@@ -41,7 +41,7 @@ from rich.panel import Panel
 load_dotenv()
 
 app = typer.Typer(add_completion=False)
-console = Console()
+console = Console(stderr=True)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _ROOT = Path(__file__).parent.parent
@@ -92,10 +92,10 @@ def _run_container(
         "--network", "creuset-net",
         "--memory", "512m",
         "--cpus", "1.0",
+        "-e", f"OPENAI_API_BASE=http://llm-proxy:11434{os.environ.get('OPENAI_API_BASE', '').replace('https://api.groq.com', '').replace('http://localhost:11434', '')}",
         "--env-file", str(_ENV_FILE.resolve()),
         "-v", f"{scenario_abs}:/scenario.json:ro",
         _AGENT_IMAGE,
-        "python", "run_agent.py",
         "--scenario-file", "/scenario.json",
         "--variant", variant,
     ]
@@ -109,6 +109,8 @@ def _run_container(
             capture_output=True,
             text=True,
             timeout=_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
         )
         elapsed = time.time() - start_ts
 

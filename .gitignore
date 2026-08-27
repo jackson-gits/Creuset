@@ -1,5 +1,7 @@
 # AgentGuard — dependency secrets (NEVER commit this)
 .env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -15,8 +17,10 @@ venv/
 env/
 
 # Logs (keep dir structure, ignore content)
+logs/*.json
 logs/gate_runs/*.json
 logs/live_traffic/*.json
+!logs/.gitkeep
 !logs/gate_runs/.gitkeep
 !logs/live_traffic/.gitkeep
 

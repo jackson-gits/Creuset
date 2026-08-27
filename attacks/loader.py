@@ -116,6 +116,8 @@ def _run_one(case: Dict[str, Any], variant: str) -> Dict[str, Any]:
                 text=True,
                 timeout=int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "120")) + 10,
                 cwd=str(_ROOT),
+                encoding="utf-8",
+                errors="replace",
             )
             # run_test.py prints JSON transcript on stdout
             stdout = proc.stdout.strip()
