@@ -1,0 +1,117 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Creuset — top-level Docker Compose
+#
+# Services:
+#   mock-services  — fake API endpoints (always running during gate tests)
+#   agent-blue     — current live agent slot
+#   agent-green    — candidate agent slot (spun up by gate, torn down on fail)
+#   router         — Python FastAPI reverse proxy; reads deploy/state.json
+#
+# Network:
+#   creuset-net — internal: true → no outbound internet from any container
+#                 Only intra-network traffic is allowed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+networks:
+  creuset-net:
+    driver: bridge
+    internal: true   # ← CRITICAL: blocks outbound internet access
+
+services:
+
+  # ── Mock services (fake REST API) ─────────────────────────────────────────
+  mock-services:
+    build:
+      context: ./sandbox/mock_services
+      dockerfile: Dockerfile
+    container_name: mock-services
+    networks:
+      - creuset-net
+    ports:
+      - "8001:8001"   # exposed to host for manual inspection only
+    env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.50"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Blue agent slot (starts as active live slot) ──────────────────────────
+  agent-blue:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: agent-blue
+    networks:
+      - creuset-net
+    ports:
+      - "8000:8000"
+    environment:
+      - AGENT_VARIANT=hardened   # blue starts hardened by convention
+      - SLOT=blue
+    env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.00"
+    depends_on:
+      mock-services:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Green agent slot (candidate — managed by gate script) ─────────────────
+  agent-green:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: agent-green
+    networks:
+      - creuset-net
+    ports:
+      - "8002:8000"
+    environment:
+      - AGENT_VARIANT=naive   # gate will override this per version under test
+      - SLOT=green
+    env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.00"
+    depends_on:
+      mock-services:
+        condition: service_healthy
+    profiles:
+      - green   # only started explicitly: docker compose --profile green up agent-green
+    restart: "no"
+
+  # ── Router (blue-green traffic switch) ────────────────────────────────────
+  router:
+    build:
+      context: ./deploy
+      dockerfile: Dockerfile.router
+    container_name: creuset-router
+    networks:
+      - creuset-net
+    ports:
+      - "8080:8080"   # external traffic hits the router
+    volumes:
+      - ./deploy/state.json:/app/state.json   # router reads active slot from here
+    env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+    depends_on:
+      - agent-blue
+    restart: unless-stopped

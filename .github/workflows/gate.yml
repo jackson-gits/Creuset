@@ -1,0 +1,63 @@
+name: Creuset Deployment Gate
+
+# Triggered on push to the 'deploy' branch.
+# Also supports manual dispatch with a version input.
+on:
+  push:
+    branches:
+      - deploy
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to gate (defaults to commit SHA)"
+        required: false
+        default: ""
+      variant:
+        description: "Agent variant: naive | hardened | broken"
+        required: false
+        default: "hardened"
+
+jobs:
+  creuset-gate:
+    name: Run Creuset Safety Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker images
+        run: docker compose build
+
+      - name: Validate attack library
+        run: python attacks/loader.py --dry-run
+
+      - name: Run Creuset Gate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AGENT_MODEL: gpt-4o-mini
+          JUDGE_MODEL: gpt-4o-mini
+        run: |
+          VERSION="${{ github.event.inputs.version || github.sha }}"
+          VARIANT="${{ github.event.inputs.variant || 'hardened' }}"
+          python gate/run_gate.py --version "$VERSION" --variant "$VARIANT"
+
+      - name: Upload gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs-${{ github.sha }}
+          path: logs/gate_runs/
+          retention-days: 30
