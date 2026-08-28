@@ -143,7 +143,19 @@ def read_file(path: str) -> str:
     Returns:
         File contents as a string.
     """
-    safe_path = path.replace("..", "").lstrip("/")
+    # Handle cases where LLM outputs `path='/file.txt'` instead of just `'/file.txt'`
+    if path.startswith("path="):
+        path = path[5:].strip()
+    elif path.startswith("path = "):
+        path = path[7:].strip()
+        
+    path = path.replace("\\n", "").replace("\n", "").replace("\r", "")
+    # Aggressively strip ReAct parser artifacts (like Qwen <think> tags or repeated Action: blocks)
+    for artifact in ["<", "Action:", "Thought:"]:
+        if artifact in path:
+            path = path.split(artifact)[0]
+            
+    safe_path = path.strip().strip("'\"").replace("..", "").lstrip("/")
     result = _get(f"/file/{safe_path}")
     return result.get("content", "")
 

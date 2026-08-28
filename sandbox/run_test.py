@@ -92,7 +92,6 @@ def _run_container(
         "--network", "creuset-net",
         "--memory", "512m",
         "--cpus", "1.0",
-        "-e", f"OPENAI_API_BASE=http://llm-proxy:11434{os.environ.get('OPENAI_API_BASE', '').replace('https://api.groq.com', '').replace('http://localhost:11434', '')}",
         "--env-file", str(_ENV_FILE.resolve()),
         "-v", f"{scenario_abs}:/scenario.json:ro",
         _AGENT_IMAGE,

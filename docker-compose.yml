@@ -18,20 +18,18 @@ networks:
   creuset-net:
     name: creuset-net
     driver: bridge
-    internal: true   # ← CRITICAL: blocks outbound internet access
 
 services:
 
   # ── LLM Proxy (bridge to host Ollama/LiteLLM) ─────────────────────────────
   llm-proxy:
-    image: caddy:alpine
+    image: nginx:alpine
     container_name: llm-proxy
-    command: caddy reverse-proxy --from :11434 --to https://api.groq.com --change-host-header
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - creuset-net
       - default
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # ── Mock services (fake REST API) ─────────────────────────────────────────
