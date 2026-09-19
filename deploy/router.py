@@ -3,7 +3,8 @@ deploy/router.py
 ─────────────────
 Python FastAPI reverse-proxy — the non-optional default blue-green traffic router.
 
-Reads deploy/state.json on every request to determine the active slot.
+Reads deploy/state/state.json (STATE_FILE) on every request to determine the
+active slot.
 Forwards all traffic to http://agent-{active}:8000.
 
 Port: 8080 (external-facing)
@@ -38,7 +39,10 @@ load_dotenv()
 
 app = FastAPI(title="Creuset Router", version="1.0.0")
 
-_STATE_FILE = Path(__file__).parent / "state.json"
+# In the container this is /app/state/state.json (deploy/state bind-mounted
+# read-only); on the host it is deploy/state/state.json — the same file
+# deploy/switch.py writes. It is re-read on every request: no reload on switch.
+_STATE_FILE = Path(os.getenv("STATE_FILE") or (Path(__file__).parent / "state" / "state.json"))
 
 _SLOTS = {
     "blue": (
@@ -55,7 +59,7 @@ _SLOTS = {
 def _active_upstream() -> str:
     """Read state.json and return the upstream URL for the active slot."""
     try:
-        state = json.loads(_STATE_FILE.read_text())
+        state = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
         slot = state.get("active", "blue")
     except (FileNotFoundError, json.JSONDecodeError):
         slot = "blue"
@@ -66,14 +70,14 @@ def _active_upstream() -> str:
 
 @app.get("/health")
 async def health() -> dict:
-    active = json.loads(_STATE_FILE.read_text()).get("active", "blue") if _STATE_FILE.exists() else "blue"
+    active = json.loads(_STATE_FILE.read_text(encoding="utf-8")).get("active", "blue") if _STATE_FILE.exists() else "blue"
     return {"status": "ok", "active_slot": active}
 
 
 @app.get("/router/state")
 async def router_state() -> dict:
     if _STATE_FILE.exists():
-        return json.loads(_STATE_FILE.read_text())
+        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
     return {"active": "blue", "note": "state.json not found, defaulting to blue"}
 
 

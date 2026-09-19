@@ -20,9 +20,14 @@ env/
 logs/*.json
 logs/gate_runs/*.json
 logs/live_traffic/*.json
+logs/runs/
 !logs/.gitkeep
 !logs/gate_runs/.gitkeep
 !logs/live_traffic/.gitkeep
+
+# Runtime deployment state (written by deploy/switch.py, read by the router)
+deploy/state/*
+!deploy/state/.gitkeep
 
 # Docker
 .docker/

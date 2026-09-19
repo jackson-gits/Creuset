@@ -45,6 +45,11 @@ class LLMBudgetCallback(BaseCallbackHandler):
         llm = ChatOpenAI(callbacks=[budget])
     """
 
+    # LangChain swallows (and only logs) exceptions raised inside callback
+    # handlers unless raise_error is True — without this the budget would
+    # never actually stop a run.
+    raise_error = True
+
     def __init__(self, max_calls: Optional[int] = None) -> None:
         super().__init__()
         self.max_calls: int = max_calls or int(

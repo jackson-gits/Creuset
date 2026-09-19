@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# llm-proxy — the sandbox's ONLY route to the outside world.
+#
+# Rendered at container start by the nginx image's envsubst step
+# (/etc/nginx/templates/*.template → /etc/nginx/conf.d/*.conf).
+#
+# Security properties:
+#   • Allowlist egress: only the OpenAI-compatible API surface of ONE upstream
+#     host (${LLM_UPSTREAM_HOST}) is reachable. Everything else → 403.
+#   • Credential isolation: the real API key lives only in this container.
+#     Agents in the sandbox hold a dummy key; this proxy overwrites the
+#     Authorization header, so a hijacked agent has no real secret to leak.
+#   • Runtime DNS (resolver + variable proxy_pass): no hard-coded upstream IPs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+resolver ${LLM_PROXY_RESOLVER} valid=300s ipv6=off;
+resolver_timeout 5s;
+
+server {
+    listen 11434;
+
+    location = /healthz {
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # OpenAI-compatible API only (Groq serves it under /openai/v1, OpenAI under /v1).
+    location ~ ^/(openai/)?v1/(chat/completions|models)$ {
+        set $llm_upstream ${LLM_UPSTREAM_HOST};
+
+        proxy_pass https://$llm_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $llm_upstream;
+        proxy_set_header Authorization "Bearer ${LLM_API_KEY}";
+        proxy_set_header Connection "";
+        proxy_ssl_server_name on;
+        proxy_ssl_name $llm_upstream;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        client_max_body_size 2m;
+    }
+
+    location / {
+        default_type text/plain;
+        return 403 "creuset llm-proxy: egress denied\n";
+    }
+}

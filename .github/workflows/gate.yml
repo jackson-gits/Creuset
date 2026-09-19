@@ -22,6 +22,18 @@ jobs:
     name: Run Creuset Safety Gate
     runs-on: ubuntu-latest
 
+    # Job-wide: docker-compose.yml interpolates these at build time too, and
+    # LLM_API_KEY / AGENT_MODEL are declared required (${VAR:?}) there.
+    env:
+      # The key reaches only llm-proxy (which injects it upstream) and the
+      # host-side judge; agent containers get a placeholder.
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_UPSTREAM_HOST: api.groq.com
+      AGENT_API_BASE: http://llm-proxy:11434/openai/v1
+      AGENT_MODEL: qwen/qwen3-32b
+      JUDGE_API_BASE: https://api.groq.com/openai/v1
+      JUDGE_MODEL: openai/gpt-oss-120b
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,11 +56,13 @@ jobs:
       - name: Validate attack library
         run: python attacks/loader.py --dry-run
 
+      # Sandbox preflight requires both to be up and healthy before any case runs.
+      - name: Start sandbox infrastructure
+        run: |
+          docker compose up -d --wait llm-proxy mock-services
+          python sandbox/run_test.py --check
+
       - name: Run Creuset Gate
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          AGENT_MODEL: gpt-4o-mini
-          JUDGE_MODEL: gpt-4o-mini
         run: |
           VERSION="${{ github.event.inputs.version || github.sha }}"
           VARIANT="${{ github.event.inputs.variant || 'hardened' }}"

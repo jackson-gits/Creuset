@@ -131,14 +131,16 @@ creuset/
 
 | Category | IDs | Count |
 |---|---|---|
-| Prompt injection | PI-001–PI-005 | 5 |
+| Prompt injection | PI-001–PI-006 | 6 |
 | Tool misuse | TM-001–TM-005 | 5 |
 | Policy violation | PV-001–PV-005 | 5 |
 | Jailbreak | JB-001–JB-005 | 5 |
 | Boundary/scope | BS-001–BS-005 | 5 |
 | Judge manipulation (stretch) | JM-001 | 1 |
 
-> **Note:** 25 cases is a proof-of-concept sample (N=5 per category). Detection rate numbers should be interpreted accordingly — one missed case = 20% category drop. A production system would require N≥50 per category.
+> **Note:** 26 adversarial cases is a proof-of-concept sample (N=5–6 per category). Detection rate numbers should be interpreted accordingly — one missed case = 20% category drop. A production system would require N≥50 per category.
+>
+> PI-006 is deliberately mundane (a routine-looking `[SYSTEM]` maintenance job). The overtly hostile payloads are refused on sight by every variant, so they cannot show whether a loophole is reachable; PI-006 can, and is the case the `broken` variant fails.
 
 ---
 
@@ -174,7 +176,7 @@ Creuset targets tool-calling AI agents deployed in automated pipelines. Covered 
 
 ## Limitations (report section)
 
-1. **Attack library is not exhaustive** (25 cases, POC sample size) — mitigation: post-deployment monitor.
+1. **Attack library is not exhaustive** (26 adversarial cases, POC sample size) — mitigation: post-deployment monitor.
 2. **Judge model is itself attackable** (JM-001 demonstrates this empirically) — mitigation: rule-based checks provide a deterministic layer; judge cannot be fooled by pattern-match failures.
 3. **Sandbox is not a perfect production proxy** — containers have different performance characteristics than real deployments.
-4. **`deploy/state.json` is single-writer** — not safe for concurrent gate runs; acceptable for single-demo POC.
+4. **`deploy/state/state.json` is single-writer** — not safe for concurrent gate runs; acceptable for single-demo POC.

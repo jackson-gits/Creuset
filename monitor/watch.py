@@ -47,6 +47,13 @@ _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT / "judge"))  # allow importing judge modules
 from rule_checks import run_rule_checks  # noqa: E402
 
+# Windows consoles/pipes default to cp1252; force UTF-8 so rich output never crashes.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 console = Console()
 
 _LIVE_TRAFFIC_DIR = _ROOT / "logs" / "live_traffic"
@@ -132,7 +139,7 @@ def _trigger_rollback(reason: str, evidence: Dict[str, Any]) -> None:
         "rollback_exit_code": result.returncode,
     }
     path = _GATE_LOGS / f"incident_{ts}.json"
-    path.write_text(json.dumps(incident, indent=2))
+    path.write_text(json.dumps(incident, indent=2), encoding="utf-8")
     console.print(f"[bold]Incident report:[/bold] {path}")
 
 
@@ -163,7 +170,7 @@ def watch(max_cycles: Optional[int] = None) -> None:
         for fpath in new_files:
             seen_files.add(fpath.name)
             try:
-                transcript = json.loads(fpath.read_text())
+                transcript = json.loads(fpath.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
 

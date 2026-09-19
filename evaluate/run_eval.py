@@ -47,6 +47,13 @@ from tabulate import tabulate
 load_dotenv()
 
 app = typer.Typer(add_completion=False)
+# Windows consoles/pipes default to cp1252; force UTF-8 so rich output never crashes.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 console = Console()
 
 _ROOT = Path(__file__).parent.parent
@@ -56,6 +63,7 @@ _SCORE_SCRIPT = _ROOT / "judge" / "score.py"
 _BENIGN_LIB = _ROOT / "attacks" / "benign_tasks.yaml"
 _ATTACK_LIB = _ROOT / "attacks" / "attack_library.yaml"
 _LOGS_DIR = _ROOT / "logs"
+_RUNS_DIR = _LOGS_DIR / "runs"
 _TRAFFIC_SIM = _ROOT / "monitor" / "simulate_traffic.py"
 _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"
 
@@ -81,10 +89,12 @@ def _run_gate(variant: str, skip_model_judge: bool) -> Dict[str, Any]:
     # Find the most recent gate record
     gate_runs = sorted(_LOGS_DIR.glob("gate_runs/gate_*.json"), key=lambda p: p.stat().st_mtime)
     if gate_runs:
-        record = json.loads(gate_runs[-1].read_text())
+        record = json.loads(gate_runs[-1].read_text(encoding="utf-8"))
     else:
-        record = {"gate_verdict": "FAIL" if result.returncode != 0 else "PASS"}
+        record = {"verdict": "FAIL" if result.returncode != 0 else "PASS"}
 
+    # run_gate.py writes the key as "verdict"; normalise so callers have one name.
+    record["gate_verdict"] = record.get("verdict", record.get("gate_verdict", "UNKNOWN"))
     record["_elapsed_seconds"] = elapsed
     return record
 
@@ -99,14 +109,15 @@ def _run_false_positive_check(variant: str, skip_model_judge: bool) -> Dict[str,
         "--library", str(_BENIGN_LIB),
         "--variant", variant,
     ]
+    started = time.time()
     subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
 
-    # Find most recent batch manifest
-    manifests = sorted(_LOGS_DIR.glob("batch_*.json"), key=lambda p: p.stat().st_mtime)
+    # Newest manifest from THIS run — an older one would score stale transcripts.
+    manifests = [p for p in _RUNS_DIR.glob("*/manifest.json") if p.stat().st_mtime >= started]
     if not manifests:
         return {"fp_rate": None, "error": "No batch manifest found"}
 
-    manifest = manifests[-1]
+    manifest = max(manifests, key=lambda p: p.stat().st_mtime)
     ts = int(time.time())
     report_path = _LOGS_DIR / f"benign_score_{ts}.json"
 
@@ -118,22 +129,31 @@ def _run_false_positive_check(variant: str, skip_model_judge: bool) -> Dict[str,
     if skip_model_judge:
         score_cmd.append("--skip-model-judge")
 
-    subprocess.run(score_cmd, cwd=str(_ROOT / "judge"), capture_output=False, text=True)
+    subprocess.run(score_cmd, cwd=str(_ROOT), capture_output=False, text=True)
 
     if not report_path.exists():
         return {"fp_rate": None, "error": "Score report not written"}
 
-    report = json.loads(report_path.read_text())
+    report = json.loads(report_path.read_text(encoding="utf-8"))
     results = report.get("results", [])
     if not results:
         return {"fp_rate": None, "error": "No results in report"}
 
-    blocked = sum(1 for r in results if r.get("final") == "FAIL")
-    fp_rate = blocked / len(results)
+    # A benign case that never ran (timeout, 429, container crash) is a harness
+    # failure, not the agent over-refusing. Counting those as false positives
+    # would let a flaky run inflate the headline metric, so they are reported
+    # separately and excluded from the rate.
+    errored = [r for r in results if r.get("status") != "completed" or r.get("judge_error")]
+    completed = [r for r in results if r.get("status") == "completed" and not r.get("judge_error")]
+    blocked = [r for r in completed if r.get("final") == "FAIL"]
     return {
         "total_benign": len(results),
-        "incorrectly_blocked": blocked,
-        "fp_rate": round(fp_rate * 100, 1),
+        "completed": len(completed),
+        "harness_errors": len(errored),
+        "harness_error_ids": [r["test_id"] for r in errored],
+        "incorrectly_blocked": len(blocked),
+        "blocked_ids": [r["test_id"] for r in blocked],
+        "fp_rate": round(len(blocked) / len(completed) * 100, 1) if completed else None,
         "report_path": str(report_path),
     }
 
@@ -161,12 +181,26 @@ def _measure_rollback_latency() -> float:
 
 
 def _compute_detection_rates(gate_record: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute per-category and overall attack detection rates from a gate record."""
+    """
+    Per-category and overall attack detection rates from a gate record.
+
+    Only cases that actually ran are counted. The gate scores a case that never
+    produced a transcript (rate limit, timeout, crashed container) as FAIL, which
+    is the right call for a *security* decision — fail closed. But FAIL also means
+    "attack detected" here, so counting those would report an exhausted API quota
+    as a perfect detection rate. Harness errors are reported separately instead,
+    and a run with many of them is not a valid measurement.
+    """
     score_report = gate_record.get("score_report", {})
     results = score_report.get("results", [])
 
+    # Same reasoning for a judge that could not be reached: it fails closed, so
+    # its case would otherwise read as a detection.
+    errored = [r for r in results if r.get("status") != "completed" or r.get("judge_error")]
+    scored = [r for r in results if r.get("status") == "completed" and not r.get("judge_error")]
+
     by_category: Dict[str, Dict[str, int]] = {}
-    for r in results:
+    for r in scored:
         cat = r.get("category", "unknown")
         if cat not in by_category:
             by_category[cat] = {"total": 0, "detected": 0}
@@ -179,7 +213,15 @@ def _compute_detection_rates(gate_record: Dict[str, Any]) -> Dict[str, Any]:
     overall = round(detected / total * 100, 1) if total else None
 
     rates = {cat: round(v["detected"] / v["total"] * 100, 1) for cat, v in by_category.items() if v["total"]}
-    return {"overall": overall, "by_category": rates, "total_cases": total, "detected": detected}
+    return {
+        "overall": overall,
+        "by_category": rates,
+        "cases_scored": total,
+        "detected": detected,
+        "harness_errors": len(errored),
+        "harness_error_ids": [r["test_id"] for r in errored],
+        "valid": len(errored) == 0,
+    }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -229,51 +271,72 @@ def main(
     table.add_column("Detection Rate")
     table.add_column("False-Positive Rate")
     table.add_column("Gate Overhead (s)")
+    table.add_column("Harness Errors")
 
     for variant, r in all_results.items():
         verdict = r["gate_verdict"]
         det = r["detection"].get("overall")
         fp = r["false_positive"].get("fp_rate")
         overhead = r.get("gate_overhead_seconds")
+        errs = r["detection"].get("harness_errors", 0) + r["false_positive"].get("harness_errors", 0)
         table.add_row(
             variant,
             f"[green]{verdict}[/green]" if verdict == "PASS" else f"[red]{verdict}[/red]",
             f"{det}%" if det is not None else "N/A",
             f"{fp}%" if fp is not None else "N/A",
             f"{overhead}s" if overhead else "N/A",
+            "[green]0[/green]" if not errs else f"[red]{errs}[/red]",
         )
 
     console.print(table)
+    if any(not r["detection"].get("valid", True) for r in all_results.values()):
+        console.print("[bold red]⚠ Some cases never ran (see Harness Errors). Rates cover only the "
+                      "cases that did — this is NOT a complete measurement.[/bold red]")
 
     if rollback_latency:
         console.print(f"\n[bold]Rollback latency:[/bold] {rollback_latency}s")
 
     # ── Markdown summary ──────────────────────────────────────────────────────
     md_rows = []
+    incomplete = []
     for variant, r in all_results.items():
-        det = r["detection"].get("overall", "N/A")
-        fp = r["false_positive"].get("fp_rate", "N/A")
-        overhead = r.get("gate_overhead_seconds", "N/A")
+        det = r["detection"].get("overall")
+        fp = r["false_positive"].get("fp_rate")
+        overhead = r.get("gate_overhead_seconds")
+        scored = r["detection"].get("cases_scored", 0)
+        errs = r["detection"].get("harness_errors", 0) + r["false_positive"].get("harness_errors", 0)
+        if errs:
+            incomplete.append(f"{variant} ({errs} case(s) never ran)")
         md_rows.append([
             variant,
             r["gate_verdict"],
-            f"{det}%" if det != "N/A" else "N/A",
-            f"{fp}%" if fp != "N/A" else "N/A",
-            f"{overhead}s" if overhead != "N/A" else "N/A",
+            f"{det}% (n={scored})" if det is not None else "N/A",
+            f"{fp}%" if fp is not None else "N/A",
+            f"{overhead}s" if overhead else "N/A",
+            errs or "—",
         ])
 
     md_table = tabulate(
         md_rows,
-        headers=["Variant", "Gate Verdict", "Detection Rate", "False-Positive Rate", "Gate Overhead"],
+        headers=["Variant", "Gate Verdict", "Detection Rate", "False-Positive Rate",
+                 "Gate Overhead", "Harness Errors"],
         tablefmt="github",
     )
 
     caveats = (
-        "\n\n> **Note:** N=5 cases per adversarial category (25 total). "
+        "\n\n> **Note:** N=5-6 cases per adversarial category (26 total). "
         "One missed detection = 20% category drop. "
-        "Results demonstrate feasibility; a production system requires N≥50 per category.\n"
-        f"\n**Rollback latency (simulated):** {rollback_latency}s\n" if rollback_latency else ""
+        "Results demonstrate feasibility; a production system requires N>=50 per category.\n"
     )
+    if rollback_latency:
+        caveats += f"\n**Rollback latency (simulated):** {rollback_latency}s\n"
+    if incomplete:
+        caveats += (
+            "\n> **Incomplete run.** Cases that never produced a transcript are excluded from the\n"
+            "> rates above (the gate still fails them closed). Affected: "
+            + "; ".join(incomplete)
+            + ".\n> The usual cause is the provider's daily token quota; re-run when it resets.\n"
+        )
 
     md_content = f"## Creuset Evaluation Results\n\n{md_table}{caveats}"
 
@@ -282,10 +345,10 @@ def main(
     _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     results_path = _LOGS_DIR / f"eval_results_{ts}.json"
-    results_path.write_text(json.dumps({"ts": ts, "rollback_latency": rollback_latency, "variants": all_results}, indent=2))
+    results_path.write_text(json.dumps({"ts": ts, "rollback_latency": rollback_latency, "variants": all_results}, indent=2), encoding="utf-8")
 
     summary_path = _LOGS_DIR / f"eval_summary_{ts}.md"
-    summary_path.write_text(md_content)
+    summary_path.write_text(md_content, encoding="utf-8")
 
     console.print(f"\n[bold]Results JSON:[/bold] {results_path}")
     console.print(f"[bold]Markdown summary:[/bold] {summary_path}")

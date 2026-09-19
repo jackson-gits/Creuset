@@ -45,10 +45,18 @@ from rich.rule import Rule
 load_dotenv()
 
 app = typer.Typer(add_completion=False)
+# Windows consoles/pipes default to cp1252; force UTF-8 so rich output never crashes.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 console = Console()
 
 _ROOT = Path(__file__).parent.parent
 _ATTACK_LIB = _ROOT / "attacks" / "attack_library.yaml"
+_RUNS_DIR = _ROOT / "logs" / "runs"
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 _SCORE_SCRIPT = _ROOT / "judge" / "score.py"
 _LOADER_SCRIPT = _ROOT / "attacks" / "loader.py"
@@ -57,7 +65,17 @@ _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _run_attack_suite(variant: str) -> Optional[Path]:
+def _newest_manifest(since: float) -> Optional[Path]:
+    """
+    Newest batch manifest written by attacks/loader.py after `since`.
+    The time bound matters: scoring a manifest from an earlier run would
+    silently grade stale transcripts.
+    """
+    manifests = [p for p in _RUNS_DIR.glob("*/manifest.json") if p.stat().st_mtime >= since]
+    return max(manifests, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def _run_attack_suite(variant: str, library: Optional[Path] = None) -> Optional[Path]:
     """
     Run the full attack library through the sandbox (calls loader.py).
     Returns the path to the batch manifest, or None on failure.
@@ -67,22 +85,23 @@ def _run_attack_suite(variant: str) -> Optional[Path]:
         sys.executable, str(_LOADER_SCRIPT),
         "--variant", variant,
     ]
+    if library:
+        cmd += ["--library", str(library)]
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
+    started = time.time()
     result = subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
 
     if result.returncode != 0:
         console.print("[red]✗ Attack suite runner failed (non-zero exit).[/red]")
         return None
 
-    # Find the most recently written batch manifest
-    logs_dir = _ROOT / "logs"
-    manifests = sorted(logs_dir.glob("batch_*.json"), key=lambda p: p.stat().st_mtime)
-    if not manifests:
+    manifest = _newest_manifest(started)
+    if manifest is None:
         console.print("[red]✗ No batch manifest found after loader run.[/red]")
         return None
 
-    return manifests[-1]
+    return manifest
 
 
 def _run_scorer(manifest: Path, skip_model_judge: bool) -> Optional[Dict[str, Any]]:
@@ -106,13 +125,14 @@ def _run_scorer(manifest: Path, skip_model_judge: bool) -> Optional[Dict[str, An
 
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
-    result = subprocess.run(cmd, cwd=str(_ROOT / "judge"), capture_output=False, text=True)
+    # score.py puts its own directory on sys.path, so it runs from anywhere.
+    result = subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
 
     if not report_path.exists():
         console.print("[red]✗ Score report not written. Treating as gate FAIL.[/red]")
         return None
 
-    return json.loads(report_path.read_text())
+    return json.loads(report_path.read_text(encoding="utf-8"))
 
 
 def _write_gate_record(
@@ -137,13 +157,44 @@ def _write_gate_record(
         "score_report": score_report,
     }
     path = _GATE_LOGS / f"gate_{ts}.json"
-    path.write_text(json.dumps(record, indent=2))
+    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return path
 
 
-def _do_switch(version: str) -> bool:
+def _stage_green(version: str, variant: str) -> bool:
+    """
+    Put the gated build into the green slot BEFORE any traffic moves: write the
+    slot's env file, then recreate the container so it actually runs that build
+    and passes its healthcheck. Without this the switch would send traffic to
+    whatever green happened to be running, and the audit record would name a
+    version that was never deployed.
+    """
+    console.print(Rule("Phase 3 — Staging green slot"))
+    staged = subprocess.run(
+        [sys.executable, str(_SWITCH_SCRIPT), "prepare", "green",
+         "--version", version, "--variant", variant],
+        cwd=str(_ROOT), capture_output=False, text=True,
+    )
+    if staged.returncode != 0:
+        console.print("[red]✗ Could not stage the green slot.[/red]")
+        return False
+
+    recreate = subprocess.run(
+        ["docker", "compose", "up", "-d", "--force-recreate", "--wait", "agent-green"],
+        cwd=str(_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if recreate.returncode != 0:
+        console.print(f"[red]✗ green slot did not come up healthy:[/red] "
+                      f"{recreate.stderr.strip()[-400:]}")
+        return False
+    console.print("[green]✓ green slot is running the gated build.[/green]")
+    return True
+
+
+def _do_switch(version: str, variant: str) -> bool:
     """Call deploy/switch.py to flip traffic to green. Returns True on success."""
-    cmd = [sys.executable, str(_SWITCH_SCRIPT), "switch", "green", "--version", version]
+    cmd = [sys.executable, str(_SWITCH_SCRIPT), "switch", "green",
+           "--version", version, "--variant", variant]
     result = subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
     return result.returncode == 0
 
@@ -212,12 +263,15 @@ def main(
             decision = "DRY_RUN_WOULD_DEPLOY"
             console.print("[bold yellow]⚡ Dry run — would switch to green. Skipping actual switch.[/bold yellow]")
         else:
-            switched = _do_switch(version)
+            # Stage first, switch second: traffic never moves to a slot that is
+            # not already running the build that just passed the gate.
+            switched = _stage_green(version, _variant) and _do_switch(version, _variant)
             decision = "DEPLOYED" if switched else "SWITCH_FAILED"
             if switched:
                 console.print(f"\n[bold green]✅ DEPLOYED[/bold green] — version [cyan]{version}[/cyan] is now live (green slot).")
             else:
-                console.print("\n[bold red]⛔ Switch failed[/bold red] — gate passed but slot switch errored. Manual intervention required.")
+                console.print("\n[bold red]⛔ Deploy failed[/bold red] — gate passed but the slot did not come up "
+                              "or the switch errored. Blue stays live; manual intervention required.")
     else:
         decision = "BLOCKED"
         console.print(f"\n[bold red]⛔ GATE BLOCKED[/bold red] — version [cyan]{version}[/cyan] failed safety gate. Blue slot remains live.")

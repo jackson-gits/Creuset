@@ -1,48 +1,119 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Creuset — top-level Docker Compose
+# Creuset — Docker Compose
 #
-# Services:
-#   mock-services  — fake API endpoints (always running during gate tests)
-#   agent-blue     — current live agent slot
-#   agent-green    — candidate agent slot (spun up by gate, torn down on fail)
-#   router         — Python FastAPI reverse proxy; reads deploy/state.json
+# Networks
+#   creuset-net   internal: true — THE SANDBOX. Nothing attached to it can
+#                 reach the internet. Agents (per-test containers and the
+#                 blue/green slots) and mock-services live only here.
+#   creuset-edge  ordinary bridge. Only two dual-homed containers join it:
+#                   llm-proxy — the single EGRESS point (LLM API only)
+#                   router    — the single INGRESS point (live traffic)
 #
-# Network:
-#   creuset-net — internal: true → no outbound internet from any container
-#                 Only intra-network traffic is allowed.
+#        internet ◄── llm-proxy ◄─┐            ┌─► agent-blue ─┐
+#   (LLM API only)   (allowlist,  │ creuset-net│               ├─► mock-services
+#                     injects key)└────────────┴─► agent-green ┘
+#        host:8081 ──► router ────────────────────┘ (active slot from deploy/state/)
+#
+# Secrets
+#   The real LLM key (LLM_API_KEY in .env) is given ONLY to llm-proxy, which
+#   injects it into upstream requests. Agents run with a placeholder key, so
+#   a hijacked agent has no real credential to exfiltrate.
+#
+# Typical use
+#   docker compose build
+#   docker compose up -d llm-proxy mock-services   # needed for gate runs
+#   docker compose up -d                           # + blue/green slots + router
 # ─────────────────────────────────────────────────────────────────────────────
 
-version: "3.9"
+name: creuset
 
 networks:
   creuset-net:
     name: creuset-net
     driver: bridge
+    internal: true   # ← CRITICAL: no outbound internet from the sandbox
+  creuset-edge:
+    name: creuset-edge
+    driver: bridge
+
+# Environment shared by every agent container. Mirrors what
+# sandbox/run_test.py passes to one-shot test containers.
+x-agent-env: &agent-env
+  OPENAI_API_BASE: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
+  OPENAI_API_KEY: sandbox-placeholder-key   # real key is injected by llm-proxy
+  AGENT_MODEL: ${AGENT_MODEL:?set AGENT_MODEL in .env}
+  MOCK_SERVICES_HOST: mock-services
+  MOCK_SERVICES_PORT: "8001"
+  MAX_LLM_CALLS: ${MAX_LLM_CALLS:-15}
+  AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-700}
+  LIVE_TRAFFIC_DIR: /app/live_traffic
+
+x-agent-slot: &agent-slot
+  build:
+    context: ./agent
+  image: creuset-agent:latest
+  entrypoint: ["uvicorn", "serve:app", "--host", "0.0.0.0", "--port", "8000"]
+  command: []
+  networks:
+    - creuset-net
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  volumes:
+    - ./logs/live_traffic:/app/live_traffic
+  deploy:
+    resources:
+      limits:
+        memory: 512m
+        cpus: "1.00"
+  depends_on:
+    mock-services:
+      condition: service_healthy
+    llm-proxy:
+      condition: service_healthy
+  restart: unless-stopped
 
 services:
 
-  # ── LLM Proxy (bridge to host Ollama/LiteLLM) ─────────────────────────────
+  # ── LLM egress gateway ────────────────────────────────────────────────────
   llm-proxy:
     image: nginx:alpine
     container_name: llm-proxy
+    environment:
+      LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env}
+      LLM_UPSTREAM_HOST: ${LLM_UPSTREAM_HOST:-api.groq.com}
+      LLM_PROXY_RESOLVER: ${LLM_PROXY_RESOLVER:-127.0.0.11}
     volumes:
-      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/llm-proxy:/etc/nginx/templates:ro
     networks:
-      - creuset-net
-      - default
+      creuset-edge: {}
+      creuset-net:
+        aliases:
+          - llm-proxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:11434/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          cpus: "0.50"
     restart: unless-stopped
 
-  # ── Mock services (fake REST API) ─────────────────────────────────────────
+  # ── Mock services (fake REST API, per-run isolated worlds) ────────────────
   mock-services:
     build:
       context: ./sandbox/mock_services
-      dockerfile: Dockerfile
+    image: creuset-mock-services:latest
     container_name: mock-services
     networks:
       - creuset-net
-    ports:
-      - "8001:8001"   # exposed to host for manual inspection only
-    env_file: .env
     deploy:
       resources:
         limits:
@@ -55,74 +126,50 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Blue agent slot (starts as active live slot) ──────────────────────────
+  # ── Blue / green slots (long-running agent service) ───────────────────────
+  # Which variant/version each slot runs is recorded in deploy/state/<slot>.env,
+  # written by the gate on deployment (see deploy/switch.py). If the file is
+  # missing the image default (AGENT_VARIANT=hardened) applies.
   agent-blue:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
+    <<: *agent-slot
     container_name: agent-blue
-    networks:
-      - creuset-net
-    ports:
-      - "8000:8000"
+    env_file:
+      - path: ./deploy/state/blue.env
+        required: false
     environment:
-      - AGENT_VARIANT=hardened   # blue starts hardened by convention
-      - SLOT=blue
-    env_file: .env
-    deploy:
-      resources:
-        limits:
-          memory: 512m
-          cpus: "1.00"
-    depends_on:
-      mock-services:
-        condition: service_healthy
-    restart: unless-stopped
+      <<: *agent-env
+      SLOT: blue
 
-  # ── Green agent slot (candidate — managed by gate script) ─────────────────
   agent-green:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
+    <<: *agent-slot
     container_name: agent-green
-    networks:
-      - creuset-net
-    ports:
-      - "8002:8000"
+    env_file:
+      - path: ./deploy/state/green.env
+        required: false
     environment:
-      - AGENT_VARIANT=naive   # gate will override this per version under test
-      - SLOT=green
-    env_file: .env
-    deploy:
-      resources:
-        limits:
-          memory: 512m
-          cpus: "1.00"
-    depends_on:
-      mock-services:
-        condition: service_healthy
-    profiles:
-      - green   # only started explicitly: docker compose --profile green up agent-green
-    restart: "no"
+      <<: *agent-env
+      SLOT: green
 
-  # ── Router (blue-green traffic switch) ────────────────────────────────────
+  # ── Router (blue-green traffic switch, the only ingress) ──────────────────
   router:
     build:
       context: ./deploy
       dockerfile: Dockerfile.router
+    image: creuset-router:latest
     container_name: creuset-router
     networks:
+      - creuset-edge
       - creuset-net
     ports:
-      - "8081:8080"   # external traffic hits the router
+      - "127.0.0.1:${ROUTER_HOST_PORT:-8081}:8080"
+    environment:
+      ROUTER_PORT: "8080"
+      STATE_FILE: /app/state/state.json
     volumes:
-      - ./deploy/state.json:/app/state.json   # router reads active slot from here
-    env_file: .env
+      - ./deploy/state:/app/state:ro   # router reads the active slot live
     deploy:
       resources:
         limits:
           memory: 128m
           cpus: "0.25"
-    depends_on:
-      - agent-blue
     restart: unless-stopped
