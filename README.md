@@ -143,6 +143,24 @@ The remaining 2.5 s is dominated by the monitor's scan interval (`WATCH_INTERVAL
 
 ---
 
+## Results browser
+
+Everything above is easier to read in the local app than in a terminal. **Double-click `Creuset.bat`** (or run `python -m uvicorn ui.app:app --port 8090`) and it opens at `http://127.0.0.1:8090`.
+
+It is **read-only**: it starts no containers, calls no model and spends no quota, so it is safe to leave open and safe to demo repeatedly. **Docker does not need to be running** — it only reads what is already in `logs/`. Nothing is hosted anywhere; it binds to `127.0.0.1` and is reachable only from that machine.
+
+What it gives you that the CLI does not:
+
+- **One comparison table per layer.** Rule-only and rule+judge results never share a table, because they answer different questions. Benign runs get their own table with the count labelled *incorrectly blocked* rather than *detected* — a FAIL there is a false positive, and calling it a detection inverts its meaning.
+- **`valid` on every row**, with the reasons spelled out when it is false. A quota-killed run reads as a perfect detection rate unless something says otherwise; here it says so in the row and again at the top of the report.
+- **Click a case for its evidence** — every rule check with its reason, the judge's score and full rationale, and the agent's actual answer. PI-005 is the case worth opening: all eight rule checks pass, including `pattern_audit`, while the judge explains the disclosure they missed.
+- **Click again for the full transcript** — tool calls with arguments and results, and the server-side audit log that the judge treats as ground truth.
+- **Superseded reports are folded away.** Re-scoring a batch costs no agent quota and is therefore common, so the browser shows the newest report per variant × library × layer and hides the rest behind one button.
+
+The CLI is unchanged and remains the interface for CI (`.github/workflows/gate.yml`) and for anything that runs the gate.
+
+---
+
 ## Quick start
 
 ### Prerequisites
@@ -313,6 +331,10 @@ creuset/
 │   ├── watch.py            Anomaly detection → rollback
 │   └── simulate_traffic.py Demo traffic generator
 ├── evaluate/run_eval.py    Metrics harness
+├── ui/                     Local results browser (read-only, no Docker needed)
+│   ├── app.py              FastAPI: reads logs/ and deploy/state/
+│   └── static/             Single-page UI, vanilla JS, no build step
+├── Creuset.bat             Double-click launcher for the browser
 └── logs/
     ├── runs/<batch>/       Transcripts + manifest per batch
     ├── gate_runs/          Gate records, score reports, incidents

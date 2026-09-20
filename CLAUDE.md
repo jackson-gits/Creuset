@@ -47,6 +47,12 @@ gate/run_gate.py --version X [--variant V] [--skip-model-judge] [--dry-run]
 ```
 
 Other entry points:
+- `ui/app.py` — **local results browser** (`Creuset.bat`, or `uvicorn ui.app:app --port 8090`).
+  Read-only: reads `logs/` and `deploy/state/`, starts nothing, spends no quota, and does
+  not need Docker. The one exception is `/api/infra`, which shells out to `preflight()` and
+  is therefore slow when Docker is down — the UI only calls it when the button is pressed.
+  Paths from the browser are resolved through `_safe_log_path()`, anchored at `logs/`;
+  without that a crafted `../` would read anything on disk. See "The results browser" below.
 - `agent/serve.py` — long-running service mode (`uvicorn serve:app`) for the blue/green
   slots. `POST /invoke` runs one scenario and writes the transcript to `logs/live_traffic/`.
 - `monitor/simulate_traffic.py` writes fake transcripts to `logs/live_traffic/` and runs
@@ -287,6 +293,34 @@ payload, not a weaker prompt — a weaker prompt just turns `broken` into `naive
   report `version: unknown` for a slot that was never staged through the gate — that is
   the honest answer, not a bug.
 
+### The results browser (ui/)
+
+`Creuset.bat` → `http://127.0.0.1:8090`. FastAPI backend, single-page vanilla-JS front end,
+no build step. It exists because the interesting output of this project is prose and tables
+(judge rationales, per-case evidence, transcripts), which a terminal shows badly.
+
+Three decisions in it are load-bearing, and undoing any of them makes the numbers lie:
+
+1. **Rule-only and rule+judge never share a table.** They answer different questions. The
+   layer is inferred from `models.judge` being null (i.e. `--skip-model-judge`).
+2. **Benign runs get their own table and their own noun.** A FAIL on an attack case is a
+   detection; a FAIL on a benign task is a false positive. The backend tags each report
+   `kind: adversarial | benign` off the library name for exactly this reason.
+3. **`valid` is shown on every row, with reasons.** An invalid report's detection rate is
+   inflated by fail-closed harness errors — the naive row reads 26/26 purely because the
+   judge was unreachable. The UI never shows that number without the warning beside it.
+
+The summary folds away superseded reports, keeping the newest per
+`kind × variant × library × layer`. Re-scoring a batch costs no agent quota and is normal,
+so `logs/` accumulates many scorings of the same question; a date filter does not help
+because most of the duplicates are from the same day. Reports with no `variant` recorded
+(pre-rewrite gate records) are excluded from the comparison tables entirely — a report that
+cannot say what it scored cannot be compared — but stay reachable under "show superseded".
+
+It is deliberately read-only. Adding run-triggering is possible (`run_suite()` already takes
+an `on_result` callback that suits SSE), but a run costs 10–30 minutes and a chunk of the
+daily quota, so it should never be one stray click away.
+
 ### The finalizer (agent/run_agent.py)
 
 gpt-oss-20b sometimes ends a tool-calling run with a message that carries reasoning
@@ -465,3 +499,15 @@ why the router ignored its state file for half a session.
     per model per day** — the agent pool ended at `Used 199713`, the judge at
     `Used 199423`. That is why only hardened has a valid judge score.
   - Uncommitted at session end: the above, plus CLAUDE.md and README.
+- **2026-09-20 (7)**: Built `ui/` — a local, read-only results browser — plus `Creuset.bat`
+  to launch it. Motivation was presentation, not capability: the project's most valuable
+  output is the judge's prose and the per-case evidence, and a console table shows neither.
+  - FastAPI + vanilla JS, no build step and no new dependencies (`fastapi`/`uvicorn` were
+    already required by the router). See "The results browser" above for the three
+    decisions in it that must not be undone.
+  - Reads `logs/` only, through `_safe_log_path()`. Browser-supplied paths are untrusted;
+    `../.env` and `runs/../../.env` both return 403, verified.
+  - Docker stays optional. `/api/infra` is the only endpoint that touches it, on demand,
+    because `preflight()` is slow to fail when Docker Desktop is down.
+  - Jackson committed the previous session's work as `2eb8d90` ("up 2") partway through.
+  - Left uncommitted: `ui/`, `Creuset.bat`, and the README/CLAUDE.md sections for them.

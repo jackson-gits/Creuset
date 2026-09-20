@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Creuset</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128737;</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>CREUSET <span>· results browser</span></h1>
+  <span id="deploy-chip"></span>
+  <div class="spacer"></div>
+  <span id="infra-chip"></span>
+  <button class="ctl" id="check-infra">Check Docker</button>
+  <button class="ctl" id="theme">Light</button>
+  <button class="ctl" id="reload">Reload</button>
+</header>
+
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <main id="main"><div class="empty">Loading…</div></main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
