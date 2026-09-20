@@ -86,12 +86,22 @@ def _run_gate(variant: str, skip_model_judge: bool) -> Dict[str, Any]:
     result = subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
     elapsed = round(time.time() - start, 1)
 
-    # Find the most recent gate record
-    gate_runs = sorted(_LOGS_DIR.glob("gate_runs/gate_*.json"), key=lambda p: p.stat().st_mtime)
-    if gate_runs:
-        record = json.loads(gate_runs[-1].read_text(encoding="utf-8"))
+    # Only a record written by THIS run counts. Taking the newest gate_*.json
+    # outright would attribute a previous run's verdict and its whole per-case
+    # report to this variant whenever the gate died before writing one — and the
+    # numbers would look entirely plausible.
+    records = [p for p in _LOGS_DIR.glob("gate_runs/gate_*.json") if p.stat().st_mtime >= start]
+    if records:
+        newest = max(records, key=lambda p: p.stat().st_mtime)
+        record = json.loads(newest.read_text(encoding="utf-8"))
     else:
-        record = {"verdict": "FAIL" if result.returncode != 0 else "PASS"}
+        record = {
+            "verdict": "FAIL",
+            "decision": "BLOCKED",
+            "score_report": None,
+            "error": f"The gate wrote no audit record (exit={result.returncode}). "
+                     f"Failing closed; this variant was not measured.",
+        }
 
     # run_gate.py writes the key as "verdict"; normalise so callers have one name.
     record["gate_verdict"] = record.get("verdict", record.get("gate_verdict", "UNKNOWN"))
@@ -191,7 +201,9 @@ def _compute_detection_rates(gate_record: Dict[str, Any]) -> Dict[str, Any]:
     as a perfect detection rate. Harness errors are reported separately instead,
     and a run with many of them is not a valid measurement.
     """
-    score_report = gate_record.get("score_report", {})
+    # `or {}` rather than a .get default: run_gate.py writes score_report=None
+    # when the scorer itself failed, and a default only applies to a missing key.
+    score_report = gate_record.get("score_report") or {}
     results = score_report.get("results", [])
 
     # Same reasoning for a judge that could not be reached: it fails closed, so
@@ -220,7 +232,10 @@ def _compute_detection_rates(gate_record: Dict[str, Any]) -> Dict[str, Any]:
         "detected": detected,
         "harness_errors": len(errored),
         "harness_error_ids": [r["test_id"] for r in errored],
-        "valid": len(errored) == 0,
+        # `total > 0` matters: a gate run that produced no score report at all
+        # yields zero errored cases, which would otherwise read as a clean,
+        # valid result for a variant that was never actually measured.
+        "valid": len(errored) == 0 and total > 0,
     }
 
 
@@ -244,8 +259,18 @@ def main(
         gate_record = _run_gate(variant, skip_model_judge)
         detection = _compute_detection_rates(gate_record)
 
-        # False-positive check (benign)
-        fp = _run_false_positive_check(variant, skip_model_judge)
+        # False-positive check (benign). Skipped when the adversarial batch was
+        # cut short by the quota breaker: every benign case would fail the same
+        # way, which burns ~10 containers to learn nothing and leaves a second
+        # unusable batch behind.
+        if (gate_record.get("score_report") or {}).get("batch_complete") is False:
+            console.print(f"[yellow]Skipping the benign suite for {variant}: the adversarial batch "
+                          f"was stopped by the provider quota, so a false-positive rate measured "
+                          f"now would be meaningless.[/yellow]")
+            fp = {"fp_rate": None, "error": "Skipped — provider quota exhausted during the gate run.",
+                  "harness_errors": 0}
+        else:
+            fp = _run_false_positive_check(variant, skip_model_judge)
 
         all_results[variant] = {
             "gate_verdict": gate_record.get("gate_verdict", "UNKNOWN"),

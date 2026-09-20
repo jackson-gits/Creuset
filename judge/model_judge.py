@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -209,6 +210,53 @@ def _complete(messages: list) -> str:
             extras.pop(dropped)
 
 
+# ── Quota circuit breaker ─────────────────────────────────────────────────────
+#
+# The loader has one of these for the agent; the judge needs its own, because the
+# two models have separate daily pools and either can run out alone. Without it,
+# once the judge's TPD is gone every remaining case still issues JUDGE_SAMPLES
+# calls, each retried up to LLM_MAX_RETRIES times honouring Retry-After — 45 slow,
+# doomed requests to learn what the first three already established. Worse, each
+# one fails closed, so an exhausted quota reads downstream as the agent being
+# caught. Stop early and let `valid: false` say why.
+_QUOTA_BREAKER = int(os.getenv("JUDGE_QUOTA_BREAKER", "3"))
+_breaker_lock = threading.Lock()
+_consecutive_quota_errors = 0
+_breaker_tripped = False
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(k in text for k in ("ratelimit", "rate_limit", "429", "tokens per day"))
+
+
+def _note_outcome(exc: Optional[Exception]) -> None:
+    """Feed one judge outcome to the breaker."""
+    global _consecutive_quota_errors, _breaker_tripped
+    with _breaker_lock:
+        if exc is None:
+            _consecutive_quota_errors = 0
+        elif _is_quota_error(exc):
+            _consecutive_quota_errors += 1
+            if _consecutive_quota_errors >= _QUOTA_BREAKER:
+                _breaker_tripped = True
+        else:
+            _consecutive_quota_errors = 0
+
+
+def breaker_tripped() -> bool:
+    with _breaker_lock:
+        return _breaker_tripped
+
+
+def reset_breaker() -> None:
+    """Clear the breaker — for tests, and for a caller that knows quota is back."""
+    global _consecutive_quota_errors, _breaker_tripped
+    with _breaker_lock:
+        _consecutive_quota_errors = 0
+        _breaker_tripped = False
+
+
 def _judge_once(transcript: Dict[str, Any], test_case: Dict[str, Any]) -> Dict[str, Any]:
     """One judge call. Raises on transport/parse failure."""
     raw = _complete(build_messages(transcript, test_case))
@@ -229,9 +277,16 @@ def run_model_judge(transcript: Dict[str, Any], test_case: Dict[str, Any]) -> Di
     must never silently become a PASS.
     """
     samples: List[Dict[str, Any]] = []
+    if breaker_tripped():
+        reason = (f"Judge quota exhausted earlier in this run ({_QUOTA_BREAKER} consecutive "
+                  f"rate-limit failures); not called again. Fail-closed — this is an "
+                  f"infrastructure failure, not a finding about the agent.")
+        return {"verdict": "FAIL", "score": 0, "rationale": reason, "model": JUDGE_MODEL,
+                "samples": [], "error": f"QuotaBreaker: {reason}"}
     try:
         for _ in range(_JUDGE_SAMPLES):
             samples.append(_judge_once(transcript, test_case))
+        _note_outcome(None)
         scores = sorted(s["score"] for s in samples)
         score = scores[len(scores) // 2]  # median
         # Quote the rationale of a sample that actually scored the median.
@@ -247,6 +302,7 @@ def run_model_judge(transcript: Dict[str, Any], test_case: Dict[str, Any]) -> Di
             "error": None,
         }
     except Exception as e:  # pylint: disable=broad-except
+        _note_outcome(e)
         return {
             "verdict": "FAIL",
             "score": 0,

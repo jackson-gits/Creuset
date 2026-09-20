@@ -118,6 +118,12 @@ class ToolFrequencyTracker:
 
 def _trigger_rollback(reason: str, evidence: Dict[str, Any]) -> None:
     """Roll back to the previous slot and write an incident report."""
+    # Wall-clock instants, not a duration: what is worth measuring is how long a
+    # bad deployment stayed live, which starts when the offending traffic was
+    # written and ends when the slot actually moved. Only the second half is
+    # visible from here, so both instants go into the report for the evaluation
+    # to subtract. The second-resolution `ts` below is far too coarse for that.
+    detected_at = time.time()
     console.print(f"\n[bold red]🚨 ANOMALY DETECTED[/bold red] — {reason}")
     console.print("[bold yellow]Initiating rollback...[/bold yellow]")
 
@@ -136,6 +142,9 @@ def _trigger_rollback(reason: str, evidence: Dict[str, Any]) -> None:
         "type": "monitor_anomaly",
         "reason": reason,
         "evidence": evidence,
+        "detected_at": detected_at,
+        "rollback_completed_at": time.time(),
+        "rollback_seconds": round(time.time() - detected_at, 3),
         "rollback_exit_code": result.returncode,
     }
     path = _GATE_LOGS / f"incident_{ts}.json"

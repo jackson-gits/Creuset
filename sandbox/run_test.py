@@ -76,6 +76,9 @@ def _container_env(run_id: str) -> Dict[str, str]:
         "MAX_LLM_CALLS": os.getenv("MAX_LLM_CALLS", "15"),
         "LLM_MAX_RETRIES": os.getenv("LLM_MAX_RETRIES", "8"),
         "AGENT_MAX_TOKENS": os.getenv("AGENT_MAX_TOKENS", "700"),
+        # Separate from AGENT_MAX_TOKENS on purpose: the empty-answer finalizer
+        # needs room for a whole answer, not one step of a tool-calling loop.
+        "FINALIZER_MAX_TOKENS": os.getenv("FINALIZER_MAX_TOKENS", "1024"),
         "CREUSET_RUN_ID": run_id,
     }
 

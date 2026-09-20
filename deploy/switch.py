@@ -50,8 +50,13 @@ _STATE_FILE = _STATE_DIR / "state.json"
 _LEGACY_STATE_FILE = Path(__file__).parent / "state.json"  # pre-state-dir layout
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 
+# `version`/`variant` describe the ACTIVE slot. `slots` records what each slot
+# runs independently, which is what makes an honest rollback possible: without
+# it, rolling back could only report the build it was rolling away from.
 _DEFAULT_STATE = {"active": "blue", "previous": None, "version": "initial",
-                  "variant": None, "switched_at": None}
+                  "variant": None, "switched_at": None,
+                  "slots": {"blue": {"version": "initial", "variant": None},
+                            "green": {"version": "unknown", "variant": None}}}
 
 
 # ── State helpers ─────────────────────────────────────────────────────────────
@@ -59,8 +64,27 @@ _DEFAULT_STATE = {"active": "blue", "previous": None, "version": "initial",
 def _read_state() -> dict:
     for path in (_STATE_FILE, _LEGACY_STATE_FILE):
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    return dict(_DEFAULT_STATE)
+            return _migrate(json.loads(path.read_text(encoding="utf-8")))
+    return json.loads(json.dumps(_DEFAULT_STATE))  # deep copy
+
+
+def _migrate(state: dict) -> dict:
+    """
+    Backfill `slots` for state files written before it existed.
+
+    Only the active slot's build is knowable from an old file, so the other slot
+    is marked unknown rather than guessed - claiming a build that was never
+    recorded is exactly the kind of thing this field exists to prevent.
+    """
+    if "slots" in state:
+        return state
+    active = state.get("active", "blue")
+    state["slots"] = {
+        slot: ({"version": state.get("version", "unknown"), "variant": state.get("variant")}
+               if slot == active else {"version": "unknown", "variant": None})
+        for slot in ("blue", "green")
+    }
+    return state
 
 
 def _write_state(state: dict) -> None:
@@ -102,6 +126,14 @@ def status() -> None:
     console.print(f"[bold]Version:[/bold]       {state.get('version', '?')}")
     console.print(f"[bold]Variant:[/bold]       {state.get('variant') or '?'}")
     console.print(f"[bold]Switched at:[/bold]   {state.get('switched_at', 'never')}")
+    for slot, build in (state.get("slots") or {}).items():
+        marker = "[cyan]<- live[/cyan]" if slot == state["active"] else ""
+        console.print(f"  [dim]{slot}:[/dim] version={build.get('version', '?')} "
+                      f"variant={build.get('variant') or '?'} {marker}")
+    if state.get("rolled_back_from"):
+        rb = state["rolled_back_from"]
+        console.print(f"  [dim]rolled back from {rb.get('slot')} "
+                      f"(version {rb.get('version')}, variant {rb.get('variant')})[/dim]")
 
 
 @app.command()
@@ -121,6 +153,9 @@ def prepare(
         console.print("[red]Error:[/red] slot must be 'blue' or 'green'.")
         raise typer.Exit(code=1)
     _write_slot_env(slot, variant, version)
+    state = _read_state()
+    state["slots"][slot] = {"version": version, "variant": variant}
+    _write_state(state)
     console.print(f"[green]✓ Staged:[/green] {slot} → variant={variant} version={version}")
 
 
@@ -141,8 +176,10 @@ def switch(
     # The slot's env file is written even when the slot is already active:
     # it records which build was gated, not which slot serves traffic.
     _write_slot_env(target, variant, version)
+    state["slots"][target] = {"version": version, "variant": variant or state.get("variant")}
 
     if previous == target:
+        _write_state(state)  # keep the build record even when traffic does not move
         console.print(f"[yellow]Already on {target}. No switch needed.[/yellow]")
         return
 
@@ -152,6 +189,7 @@ def switch(
         "version": version,
         "variant": variant or state.get("variant"),
         "switched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "slots": state["slots"],
     }
     _write_state(new_state)
     _log_switch("switch", new_state)
@@ -169,17 +207,27 @@ def rollback() -> None:
         console.print("[red]No previous slot recorded. Cannot roll back.[/red]")
         raise typer.Exit(code=1)
 
+    # What is live after a rollback is whatever `previous` was already running.
+    # Reporting `rollback-from-<old>` as the version, and carrying the abandoned
+    # slot's variant across with it, described the build being rolled AWAY from
+    # as though it were the one now serving traffic - the audit record then named
+    # the wrong variant as live.
+    restored = state["slots"].get(previous) or {"version": "unknown", "variant": None}
     new_state = {
         "active": previous,
         "previous": state["active"],
-        "version": f"rollback-from-{state.get('version', '?')}",
-        "variant": state.get("variant"),
+        "version": restored.get("version", "unknown"),
+        "variant": restored.get("variant"),
         "switched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "rolled_back_from": {"slot": state["active"], "version": state.get("version"),
+                             "variant": state.get("variant")},
+        "slots": state["slots"],
     }
     _write_state(new_state)
     _log_switch("rollback", new_state)
 
-    console.print(f"[bold yellow]⚠ Rollback:[/bold yellow] {state['active']} → {previous}")
+    console.print(f"[bold yellow]⚠ Rollback:[/bold yellow] {state['active']} → {previous} "
+                  f"(now serving version {new_state['version']}, variant {new_state['variant']})")
 
 
 if __name__ == "__main__":

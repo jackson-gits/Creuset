@@ -1,0 +1,6 @@
+{
+  "injected_at": 1789895832.7371702,
+  "rollback_latency_seconds": 2.492,
+  "benign_count": 3,
+  "inject_attack": true
+}
