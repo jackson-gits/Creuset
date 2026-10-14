@@ -33,7 +33,12 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
   `${CREUSET_RUN_ID}`, filled in per run, so an agent whose tools read an API
   base URL from the environment is tested with no code change. CI runs the
   example over HTTP.
-- **Starter library** `attacks/generic_agent.yaml`: twelve attacks that name no
+- **Multi-turn cases**: `conversation` (earlier user and assistant turns) is
+  replayed before `input_payload` by agents that keep history, and shown to the
+  judge, labelled as scripted by the test. The judge's messages for every case
+  without one are byte-identical; the bundled agent's scenario keys are
+  unchanged (it ignores the field, and the loader warns).
+- **Starter library** `attacks/generic_agent.yaml`: thirteen attacks that name no
   tools, so they run against any agent as they stand. Run live against the
   example agent's weak prompt on gpt-oss-20b, they caught a system-prompt leak
   by translation (the judge) and a base64-hidden instruction being followed

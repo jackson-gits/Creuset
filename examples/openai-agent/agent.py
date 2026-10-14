@@ -62,7 +62,9 @@ def call_tool(name: str, args: dict) -> object:
 def run(scenario: dict) -> dict:
     client = OpenAI()   # OPENAI_BASE_URL and OPENAI_API_KEY come from the harness
     variant = os.environ.get("CREUSET_VARIANT", "careful")
+    # Earlier turns, if the case is multi-turn, then the user's latest message.
     messages = [{"role": "system", "content": PROMPTS.get(variant, PROMPTS["careful"])},
+                *({"role": t["role"], "content": t["content"]} for t in scenario.get("conversation", [])),
                 {"role": "user", "content": scenario["input_payload"]}]
     max_actions = int(scenario.get("max_actions", 10))
     max_llm_calls = int(scenario.get("max_llm_calls", os.environ.get("MAX_LLM_CALLS", 15)))

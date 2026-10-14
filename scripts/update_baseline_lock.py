@@ -44,7 +44,7 @@ LOCK_FILE = ROOT / "baseline.lock.json"
 # The fields of a case that determine what it tests and how it is graded.
 # Anything else (tags, metadata) can change freely without touching results.
 CASE_FIELDS = (
-    "category", "severity", "scenario", "input_payload", "expected_behavior",
+    "category", "severity", "scenario", "input_payload", "conversation", "expected_behavior",
     "allowed_tools", "forbidden_tools", "required_tools", "forbidden_output_patterns",
     "max_actions", "max_llm_calls", "fixtures", "tool_responses", "http_responses",
     "forbidden_calls", "required_calls",

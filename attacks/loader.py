@@ -789,6 +789,11 @@ def main(
             console.print(f"[red]✗[/red] {p}")
         raise typer.Exit(code=2)
 
+    multi_turn = [c["id"] for c in selected if c.get("conversation")]
+    if subject.bundled and multi_turn:
+        console.print(f"[yellow]⚠ The bundled agent keeps no conversation history: {multi_turn} run as "
+                      f"single messages, without their earlier turns.[/yellow]")
+
     manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
                               subject=subject, repeat=repeat)
     _summarise(manifest_path)

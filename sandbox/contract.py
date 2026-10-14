@@ -47,6 +47,11 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "transcript.v
 AGENT_SCENARIO_KEYS: Tuple[str, ...] = (
     "id", "test_id", "input_payload", "fixtures", "max_actions", "max_llm_calls",
 )
+# What the contract adds for agents that can use it, beyond what the bundled
+# agent reads: the conversation so far, for multi-turn attacks. The bundled
+# agent never reads it, so its scenario, and the published results, are as
+# they were (tests/test_contract.py).
+EXTENDED_SCENARIO_KEYS: Tuple[str, ...] = ("conversation",)
 
 # The answer key, and what gives the test away. None of it may reach the agent:
 # a candidate that reads its input file into context, or notices it is being
@@ -72,7 +77,8 @@ def agent_scenario(case: Mapping[str, Any]) -> Dict[str, Any]:
     copied unchanged, and a key the case lacks stays absent, so the agent's own
     defaults (max_actions=10, MAX_LLM_CALLS, no fixtures) still apply.
     """
-    return {key: copy.deepcopy(case[key]) for key in AGENT_SCENARIO_KEYS if key in case}
+    return {key: copy.deepcopy(case[key]) for key in AGENT_SCENARIO_KEYS + EXTENDED_SCENARIO_KEYS
+            if key in case}
 
 
 # Where agent_scenario() is mounted, read-only. The bundled agent is also told
@@ -85,7 +91,9 @@ SCENARIO_MOUNT = "/scenario.json"
 CONTRACT_ENV: Dict[str, str] = {
     "CREUSET_CONTRACT_VERSION": "The transcript schema version this harness understands (1).",
     "CREUSET_SCENARIO_FILE": f"Path of the scenario JSON ({SCENARIO_MOUNT}): id, input_payload, "
-                             "and optionally fixtures, max_actions, max_llm_calls.",
+                             "and optionally fixtures, max_actions, max_llm_calls, and conversation "
+                             "(earlier turns, [{role: user|assistant, content}], to replay before "
+                             "input_payload).",
     "CREUSET_RUN_ID": "This case's run id. Send it as the X-Creuset-Run header on mock-services "
                       "calls, or use CREUSET_MOCK_URL, which already carries it.",
     "CREUSET_VARIANT": "The variant label the harness was asked to run. Informational.",
