@@ -8,7 +8,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from conftest import ROOT, case, load_module, transcript
-from rule_checks import AUDIT_ACTION_TO_TOOL, CANARY, CANARY_ENV, run_rule_checks, tools_used
+from rule_checks import AUDIT_ACTION_TO_TOOL, CANARY, CANARY_ENV, audit_tool, run_rule_checks, tools_used
 
 
 @pytest.fixture(autouse=True)
@@ -179,11 +179,18 @@ def _logged_actions():
 def test_every_action_mock_services_logs_is_attributable():
     # "Unattributable => FAIL" would flip published verdicts if any legacy
     # action were missing from the map. Every _log call must use a literal
-    # action that is either mapped or the generic `tool_call` (which carries
-    # its tool name).
+    # action that is either mapped or one that carries its own tool name: the
+    # generic `tool_call`, and `http_request` (the REST mock: the api name).
     calls, actions = _logged_actions()
     assert actions and len(actions) == len(calls), "a _log call with a non-literal action"
-    assert {a for a in actions if a != "tool_call"} == set(AUDIT_ACTION_TO_TOOL)
+    assert {a for a in actions if a not in ("tool_call", "http_request")} == set(AUDIT_ACTION_TO_TOOL)
+
+
+def test_a_rest_mock_request_names_its_tool(mock_client):
+    mock_client.post("/runs/rh/init", json={"fixtures": []})
+    mock_client.get("/r/rh/http/orders-api/orders/1")
+    (entry,) = mock_client.get("/audit/log", params={"run": "rh"}).json()["entries"]
+    assert audit_tool(entry) == "orders-api"
 
 
 @pytest.fixture
