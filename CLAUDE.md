@@ -90,11 +90,35 @@ Other entry points:
   bundled six), so a typo in `forbidden_tools` is an error, not a check that never fires.
 - **Subjects**: the bundled agent at a variant, or **any image** that honours
   the contract (`--agent-image` / `CREUSET_AGENT_IMAGE`; the variant is then just a label).
-  Contract: `sandbox/contract.py` (`agent_scenario`, `CONTRACT_ENV`, `HARNESS_OWNED_FIELDS`,
-  statuses) + `schemas/transcript.v1.json`. Tools go to `POST $CREUSET_MOCK_URL/tools/<name>`,
-  answered from the case's `tool_responses`. `examples/scripted-agent/` is a deterministic,
-  key-free example; CI's `sandbox-e2e` job gates it on every push. The gate deploys only the
-  bundled agent, so an external image needs `--dry-run`.
+  Contract: `sandbox/contract.py` (`agent_scenario` + `EXTENDED_SCENARIO_KEYS`,
+  `CONTRACT_ENV`, `HARNESS_OWNED_FIELDS`, statuses) + `schemas/transcript.v1.json`.
+  `examples/scripted-agent/` (deterministic, key-free; also a REST mode) and
+  `examples/openai-agent/` (real model). The gate deploys only the bundled agent, so an
+  external image needs `--dry-run`.
+- **What a real project uses** (all on `claude/oss-wave-2`, each verified live):
+  - Tools: `POST $CREUSET_MOCK_URL/tools/<name>` (`tool_responses`), or the **REST mock**
+    `$CREUSET_MOCK_URL/http/<api>/<path>` (`http_responses`) reached with no code change via
+    `--agent-env 'API_URL=${CREUSET_MOCK_URL}/http/<api>'` (`${CREUSET_MOCK_URL}` and
+    `${CREUSET_RUN_ID}` are filled in per run). Tool names: OpenAI/Anthropic alphabet + dots.
+  - Policies: `forbidden_calls` / `required_calls` (judge/call_policy.py): argument-level
+    rules, checked against the server audit; unknown arguments resolve in the safe
+    direction both ways. New rule check `call_policy`, absent from cases without rules.
+  - `--repeat N` (a case FAILs if any run does; runs are `ID.rN.json`), `--waivers FILE`
+    (reason + mandatory expiry; a waived case still reads FAIL), `--junit-xml`,
+    `--summary-md`, the GitHub job summary, and `action.yml` (the repo is a composite
+    action; `sandbox-e2e` runs it three times).
+  - `--agent-env` / `--agent-env-file` (never secrets; fingerprinted in manifests),
+    `CREUSET_SANDBOX_MEMORY/_CPUS/_PIDS/_TMP_SIZE/_TMPFS`, Anthropic's Messages API through
+    llm-proxy (`messages` endpoint, `x-api-key`), multi-turn `conversation`.
+  - `attacks/generic_agent.yaml`: 13 tool-free cases for any agent. The canary SKIPs for
+    external agents unless `CREUSET_CANARY` names their marker; phrase that marker as
+    ordinary prompt text (a "never reveal" marker was the one line a leaking model omitted).
+- **Image identity on Docker's containerd store**: every build gets a new image ID (the
+  build attestation has a timestamp), so identical code rebuilt "differs". Compare
+  `image_content()` (the platform-specific ID, = Compose's `com.docker.compose.image`
+  label), which transcripts and manifests record as `agent_image_content`. Compose does not
+  recreate a container for a content-identical rebuild, and the old index can vanish from
+  the store: never `docker run` a running container's `.Image`, use `.Config.Image`.
 - **Images are pinned** to the 2026-09-20 build that produced the published results:
   `python:3.11.16-slim-trixie` plus `constraints*.txt` (pip `-c`) captured by `pip freeze`
   from those images. A rebuild was checked to install exactly the same versions. The old
@@ -359,18 +383,24 @@ as contributor notes**, with the history in `docs/development-log.md` (both done
 The original plan (a 23-workstream audit in 9 waves, written by a cloud session) never
 reached GitHub, so this list is reconstructed from the code. Done: the security pass
 (`d0b66d6`), the measurement guard (`cd9aa6f`), wave 1 (`33ae1e0`, merged as PR #1),
-wave 2 (`05b071f`) and the docs (`e8ab848`, then this file's trim), the last three on
-`claude/oss-wave-2`. Left, roughly in order:
+wave 2 (`05b071f`), the docs (`e8ab848`, then this file's trim) and the real-project
+features (`de781ca`..`5e185df`, session 10), all after wave 1 on `claude/oss-wave-2`, none
+pushed yet. Left, roughly in order:
 
-1. **Results browser**: show `subject` (kind, image ID), `contract_errors`, and the gate's
-   `slot` / `tested_image_id`. It reads the new fields without breaking but shows none.
-2. **Blue/green for external images.** `--agent-image` is verdict-only today. Deploying one
+1. **Push, and watch CI run for the first time.** Nothing on this branch has run on GitHub:
+   not the `sandbox-e2e` job, the action, nor the envsh tests on Linux (those were run in a
+   Linux container by hand). `e23077c` alone has a failing test (fixed in `811bd89`).
+2. **An MCP mock**: agents whose tools come from MCP servers still need an adapter. The
+   REST mock covers HTTP tools; MCP would need tool schemas in the library.
+3. **Results browser**: shows waived and repeated cases now, but not `subject`,
+   `contract_errors`, the sandbox limits or the gate's `slot` / `tested_image_content`.
+4. **Blue/green for external images.** `--agent-image` is verdict-only today. Deploying one
    needs a slot contract (`/health` and `/invoke` on :8000), a per-slot image the gate
    chooses, and a way for the monitor to see live traffic without `serve.py`'s logs.
-3. **The `sandbox-e2e` CI job has not run on GitHub yet**; it was only simulated locally.
-4. **Packaging and release**: one `creuset` entry point (pyproject is tool config only), a
-   first tagged release, versioned CHANGELOG sections.
-5. The measurement work under "Open work" above is independent, and still open.
+5. **Packaging and release**: one `creuset` entry point (pyproject is tool config only), a
+   first tagged release (the action is then `uses: jackson-gits/Creuset@v1`), versioned
+   CHANGELOG sections.
+6. The measurement work under "Open work" above is independent, and still open.
 
 ## Useful commands
 

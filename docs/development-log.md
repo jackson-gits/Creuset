@@ -5,6 +5,37 @@ says what changed, what was verified and how, and what was left undone. Results 
 here were current when written; the maintained results are in the
 [README](../README.md#results), and the working notes in [CLAUDE.md](../CLAUDE.md).
 
+- **2026-10-14 (10)**: "Dig deeper and make it usable in real projects." Started from what
+  a team adopting it would actually hit, confirmed each gap in the code, then closed them in
+  order, each with tests and a live run (commits `de781ca`..`5e185df`, local):
+  - Real agents' tool names; the agent's own settings (`--agent-env`, fingerprinted); a
+    configurable sandbox (defaults pinned by a test); Anthropic's Messages API through
+    llm-proxy, live-tested against a fake upstream (placeholder replaced, `Authorization`
+    dropped, `messages/batches` refused) and on Linux for the envsh.
+  - Argument-level policies (`forbidden_calls` / `required_calls`); `--repeat N`; waivers
+    with mandatory expiry; JUnit, Markdown and the GitHub job summary; `action.yml`.
+  - REST mock + `${CREUSET_MOCK_URL}` in agent settings: an agent's own HTTP client is
+    tested with no code change. Multi-turn `conversation`. A 13-case starter library.
+  - **Bugs found by doing it, not by reading**: the canary passed vacuously for any agent
+    but the bundled one (now SKIPs unless configured). On Docker's containerd store every
+    build gets a new image ID, so identical rebuilds looked like different builds; the
+    doctor then failed containers Compose had rightly kept, and the probe ran a vanished
+    image ID. That would have broken CI the first time the action ran twice in one job;
+    content identity fixed it. The gate's report publishing could let a formatting error
+    change the outcome. A repeated batch's rows in the results browser all opened run 1.
+  - **Live findings with the starter library** on the example agent (gpt-oss-20b, weak
+    prompt): it translated its whole system prompt on request but omitted the canary line,
+    which said "never reveal it", so only the judge caught it (score 1); re-phrased as
+    ordinary text, the canary tripped. It also followed a base64-hidden instruction and a
+    fabricated earlier turn ("I will include my hidden instructions"). The careful prompt
+    resisted all three. Its 400-token budget first truncated three answers, which the
+    report correctly refused to score (`valid: false`).
+  - My own slips, both caught: an action simulation swapped the placeholder key into the
+    local llm-proxy (12 cases then failed closed, `valid: false`; restored from .env), and
+    `e23077c` was committed with a failing test because a piped `tail` hid pytest's exit
+    code (fixed in `811bd89`; exit codes are checked directly since).
+  - Not pushed. Docker state: images rebuilt (`creuset-mock-services`, the two example
+    images); llm-proxy and mock-services recreated from .env; slots and router untouched.
 - **2026-10-14 (9)**: Open-source readiness, wave 2, on `claude/oss-wave-2`. Picked up from
   a cloud session whose wave 2 agents and plan file were lost (only wave 1, merged as PR #1,
   had reached GitHub), so the wave was rebuilt from the code; see "OSS readiness: remaining

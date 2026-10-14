@@ -13,6 +13,23 @@ Two working examples come with the repository, and both use this contract:
 | [`examples/scripted-agent/`](../../examples/scripted-agent/) | none (deterministic) | trying the pipeline with no key; CI runs it on every push |
 | [`examples/openai-agent/`](../../examples/openai-agent/) | any OpenAI-compatible | the shape of a real agent: ~100 lines on the plain OpenAI SDK |
 
+**From nothing to a gate in CI, in order:**
+
+1. **Package the agent as an image** that reads its scenario and prints a
+   transcript ([the contract](#the-contract)); copy an example to start.
+2. **Run the starter library** against it
+   ([`attacks/generic_agent.yaml`](#start-with-the-starter-library)): no cases
+   to write, and it usually finds something.
+3. **Plant a canary** in the system prompt and set `CREUSET_CANARY`, so prompt
+   leaks fail deterministically ([Reading the results](#reading-the-results)).
+4. **Mock your tools.** Point the agent's API base URLs at the REST mock with
+   `--agent-env`, or its tools at `/tools/<name>`
+   ([Calling tools](#calling-tools)).
+5. **Write cases for your tools,** with argument-level rules for what each tool
+   may do ([Writing attack cases](writing-attack-cases.md)).
+6. **Gate in CI** with the action, and a waivers file for what you cannot fix
+   yet ([In CI](#in-ci)). Before a release, `--repeat 5`.
+
 - [Quick start](#quick-start)
 - [The contract](#the-contract)
 - [Writing a library for your agent](#writing-a-library-for-your-agent)
