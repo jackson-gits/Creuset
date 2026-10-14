@@ -38,6 +38,7 @@ jobs:
         run: |
           python attacks/loader.py --dry-run
           python attacks/loader.py --dry-run --library attacks/benign_tasks.yaml
+          python attacks/loader.py --dry-run --library attacks/generic_agent.yaml
           python attacks/loader.py --dry-run --library examples/scripted-agent/cases.yaml
 
       # Compose rejects some combinations (e.g. pids_limit beside

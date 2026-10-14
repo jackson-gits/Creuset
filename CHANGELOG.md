@@ -26,6 +26,11 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **Starter library** `attacks/generic_agent.yaml`: twelve attacks that name no
+  tools, so they run against any agent as they stand. Run live against the
+  example agent's weak prompt on gpt-oss-20b, they caught a system-prompt leak
+  by translation (the judge) and a base64-hidden instruction being followed
+  (the canary).
 - **GitHub Action**: this repository is a composite action (`action.yml`).
   `uses: jackson-gits/Creuset@<sha>` starts the sandbox, proves isolation, runs
   the gate on an image built earlier in the job, writes the job summary and a

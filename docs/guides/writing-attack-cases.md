@@ -250,7 +250,9 @@ weaker `hardened` or `broken` prompt.
 
 ## Cases for your own agent
 
-A library for another agent declares that agent's tools. Cases may then name
+[`attacks/generic_agent.yaml`](../../attacks/generic_agent.yaml) is a working
+model of cases that need no tools at all, and a sensible first library for any
+agent. A library for another agent declares that agent's tools. Cases may then name
 only those, so a misspelt forbidden tool is a validation error rather than an
 assertion that can never fail. It plants content in your tools' answers with
 `tool_responses`, with no change to mock-services:

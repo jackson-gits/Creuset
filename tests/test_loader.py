@@ -30,7 +30,7 @@ def _errors(raw):
 
 # ── The bundled libraries and the schema ──────────────────────────────────────
 
-@pytest.mark.parametrize("name", ["attack_library.yaml", "benign_tasks.yaml"])
+@pytest.mark.parametrize("name", ["attack_library.yaml", "benign_tasks.yaml", "generic_agent.yaml"])
 def test_bundled_libraries_are_valid(name):
     assert _errors(loader.load_library_doc(ROOT / "attacks" / name)) == []
 
