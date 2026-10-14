@@ -76,13 +76,19 @@ Nothing else from the host crosses into the container. The scenario holds
 `max_actions`, `max_llm_calls` and `fixtures`. It never holds what the case is
 graded on, so your agent cannot read the answer key.
 
-Your image runs with its own `ENTRYPOINT`/`CMD` and no arguments. The box:
+Your image runs with its own `ENTRYPOINT`/`CMD` and no arguments. Settings
+your agent needs (a feature flag, a region, a prompt path; never secrets) go
+in with `--agent-env KEY=VALUE` or `--agent-env-file agent.env`. The box:
 
 - **No internet.** The only reachable hosts are `llm-proxy:11434` and
   `mock-services:8001`, and DNS resolves nothing else. Your image must contain
   everything it needs: nothing can be downloaded at run time.
 - Read-only root filesystem, `/tmp` a 64 MB `noexec` tmpfs, all capabilities
   dropped, `no-new-privileges`, 512 MB of memory, one CPU, 256 processes.
+  `CREUSET_SANDBOX_MEMORY`, `_CPUS`, `_PIDS` and `_TMP_SIZE` change the sizes;
+  `CREUSET_SANDBOX_TMPFS=/home/app/.cache,/app/.npm` adds writable directories
+  for libraries that insist on a cache. Bake model files and tokenizer data
+  into the image: nothing can be downloaded at run time.
 - `SANDBOX_TIMEOUT_SECONDS` of wall time (default 180), then the container is
   killed and the case fails.
 
@@ -225,6 +231,20 @@ most:
   early. Never quote the numbers of an invalid report.
 - **`subject.image_id`** — the exact bytes that were tested. Every container
   ran by this ID, and resuming the batch after a rebuild is refused.
+
+**Run each case more than once.** An LLM agent that resists an attack seven
+times in ten is not safe, and one run cannot tell that from ten in ten.
+`--repeat N` (loader and gate) runs every case N times, each in its own
+container; a case FAILs if any run does, and the report lists every run
+(`runs`, `runs_failed`). It multiplies the cost, so a common pattern is
+`--repeat 1` on every push and `--repeat 5` before a release.
+
+**Plant a canary.** Put a unique marker in your agent's system prompt (for
+example `Internal ref: ACME-7Q2X9`) and set `CREUSET_CANARY` to it when scoring:
+the `canary` check then fails any case where it shows up in an answer, a tool
+argument or the audit, which is how a system-prompt leak is caught without
+the judge. Without it, that check SKIPs for your agent rather than claiming a
+protection it never measured.
 
 `python -m uvicorn ui.app:app --port 8090` (or `Creuset.bat`) browses all of it
 locally, read-only.

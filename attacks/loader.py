@@ -227,8 +227,25 @@ def _is_quota_error(transcript: Dict[str, Any]) -> bool:
     err = str(transcript.get("error") or "").lower()
     return "ratelimit" in err or "rate_limit" in err or "429" in err
 
-def _entry(case_id: str, transcript: Dict[str, Any], path: Path) -> Dict[str, Any]:
-    """One case's manifest entry, derived from its transcript."""
+MAX_REPEAT = 50
+Run = Tuple[Dict[str, Any], int]   # (case, sample number from 1)
+
+
+def run_key(case_id: str, sample: int = 1) -> str:
+    """
+    How one run of a case is named: in the manifest, in resume reasons, on disk.
+    Sample 1 keeps the plain id, so a batch that never repeats looks exactly as
+    batches always have.
+    """
+    return case_id if sample == 1 else f"{case_id}.r{sample}"
+
+
+def _entry_key(entry: Dict[str, Any]) -> str:
+    return run_key(entry["id"], int(entry.get("sample", 1)))
+
+
+def _entry(case_id: str, transcript: Dict[str, Any], path: Path, sample: int = 1) -> Dict[str, Any]:
+    """One run's manifest entry, derived from its transcript."""
     entry = {"id": case_id, "status": transcript.get("status"),
              "transcript": str(path),
              # Recorded per case so a resumed batch can never hide that some of
@@ -239,22 +256,25 @@ def _entry(case_id: str, transcript: Dict[str, Any], path: Path) -> Dict[str, An
     # left out rather than null so reconciling an old batch is not all noise.
     if transcript.get("agent_image_id"):
         entry["agent_image_id"] = transcript["agent_image_id"]
+    if sample > 1:
+        entry["sample"] = sample
     return entry
 
 
 def _execute_cases(
-    cases: List[Dict[str, Any]],
+    runs: List[Run],
     variant: str,
     batch_dir: Path,
     workers: int,
     on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any], Path], None]],
     description: str,
     subject: Optional[Subject] = None,
+    repeat: int = 1,
 ) -> List[Dict[str, Any]]:
     """
-    Run `cases` in parallel sandbox containers, writing one transcript per case
-    into `batch_dir`. Returns manifest entries sorted by id, stopping early if
-    the provider's quota circuit breaker trips.
+    Run each (case, sample) in its own sandbox container, in parallel, writing
+    one transcript per run into `batch_dir`. Returns manifest entries sorted by
+    id and sample, stopping early if the provider's quota circuit breaker trips.
     """
     entries: List[Dict[str, Any]] = []
     # A live spinner writes a frame per refresh; piped to a file or a CI log that
@@ -266,26 +286,29 @@ def _execute_cases(
                   # CI runners and agent harnesses) makes rich claim a terminal
                   # even when stdout is a file.
                   disable=not sys.stdout.isatty()) as progress:
-        task = progress.add_task(description, total=len(cases))
+        task = progress.add_task(description, total=len(runs))
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(run_case, case, variant, subject): case for case in cases}
+            futures = {pool.submit(run_case, case, variant, subject): (case, sample) for case, sample in runs}
             consecutive_quota_errors = 0
             for fut in as_completed(futures):
-                case = futures[fut]
+                case, sample = futures[fut]
                 try:
                     transcript = fut.result()
                 except Exception as e:  # pylint: disable=broad-except - never lose a case
                     transcript = {"test_id": case["id"], "variant": variant, "status": "harness_error",
                                   "error": f"{type(e).__name__}: {e}", "tool_calls": [], "steps": [],
                                   "service_audit": None, "output": ""}
-                path = batch_dir / f"{case['id']}.json"
+                if repeat > 1:
+                    transcript["sample"] = sample   # harness-owned: which of the N runs this was
+                key = run_key(case["id"], sample)
+                path = batch_dir / f"{key}.json"
                 path.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
-                entries.append(_entry(case["id"], transcript, path))
+                entries.append(_entry(case["id"], transcript, path, sample))
                 ok = transcript.get("status") == "completed"
                 tools = sorted({str(t.get("tool")) for t in transcript.get("tool_calls") or []
                                 if isinstance(t, dict)})
                 progress.console.print(
-                    f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {case['id']:<7} "
+                    f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {key:<10} "
                     f"{transcript.get('status', '?'):<16} tools={tools}"
                     + ("" if ok else f"  [red]{str(transcript.get('error', ''))[:120]}[/red]"))
                 if on_result:
@@ -306,13 +329,13 @@ def _execute_cases(
                     progress.console.print(
                         f"[bold red]⛔ Aborting batch: {consecutive_quota_errors} consecutive "
                         f"provider rate-limit failures.[/bold red] The remaining "
-                        f"{len(cases) - len(entries)} case(s) were not run - results from this "
+                        f"{len(runs) - len(entries)} run(s) were not made - results from this "
                         f"batch are incomplete, not a measurement. Finish it with "
                         f"[bold]--resume {batch_dir}[/bold] once the quota resets; every case "
                         f"that did complete is kept.")
                     break
 
-    entries.sort(key=lambda e: e["id"])
+    entries.sort(key=lambda e: (e["id"], int(e.get("sample", 1))))
     return entries
 
 
@@ -326,9 +349,12 @@ def run_suite(
     label: str = "",
     selected_ids: Optional[List[str]] = None,
     subject: Optional[Subject] = None,
+    repeat: int = 1,
 ) -> Path:
     """
     Run `cases` in parallel sandbox containers, save transcripts + manifest.
+    With `repeat` > 1 every case runs that many times, each run its own
+    container and transcript; judge/score.py fails a case if any run fails.
     `on_result(case, transcript, path)` is called as each case finishes (the gate
     uses it to start judging while other cases are still running).
     `subject` defaults to the bundled agent at `variant`.
@@ -340,8 +366,10 @@ def run_suite(
     batch_dir.mkdir(parents=True, exist_ok=True)
     started_image_id = image_id(subject.image)
 
-    entries = _execute_cases(cases, variant, batch_dir, workers, on_result,
-                             f"[cyan]{variant}[/cyan] × {library.stem}", subject)
+    runs = [(case, sample) for case in cases for sample in range(1, repeat + 1)]
+    entries = _execute_cases(runs, variant, batch_dir, workers, on_result,
+                             f"[cyan]{variant}[/cyan] × {library.stem}"
+                             + (f" × {repeat} runs" if repeat > 1 else ""), subject, repeat)
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -357,9 +385,12 @@ def run_suite(
         "selected_ids": selected_ids,  # ad-hoc subset: coverage applies to these only
         "agent_model": os.getenv("AGENT_MODEL"),
         "case_count": len(cases),
+        # Runs per case. An agent that resists an attack 7 times in 10 is not
+        # safe, and one run cannot tell 7-in-10 from 10-in-10.
+        "repeat": repeat,
         # False when the circuit breaker stopped the batch early: the missing
-        # cases are unrun, not passed or failed.
-        "complete": len(entries) == len(cases),
+        # runs are unmade, not passed or failed.
+        "complete": len(entries) == len(cases) * repeat,
         "cases": entries,
     }
     manifest_path = batch_dir / "manifest.json"
@@ -368,8 +399,8 @@ def run_suite(
 
 
 def _needs_rerun(case_id: str, entry: Optional[Dict[str, Any]], batch_dir: Path,
-                 redo_empty: bool, redo_ids: Optional[List[str]]) -> Optional[str]:
-    """Why this case has to run again, or None to keep the transcript it already has."""
+                 redo_empty: bool, redo_ids: Optional[List[str]], sample: int = 1) -> Optional[str]:
+    """Why this run has to happen again, or None to keep the transcript it already has."""
     if redo_ids and case_id in redo_ids:
         return "forced with --redo"
     if entry is None:
@@ -377,7 +408,7 @@ def _needs_rerun(case_id: str, entry: Optional[Dict[str, Any]], batch_dir: Path,
     if entry.get("status") != "completed":
         return f"previous status was '{entry.get('status')}'"
     if redo_empty:
-        path = batch_dir / f"{case_id}.json"
+        path = batch_dir / f"{run_key(case_id, sample)}.json"
         if not path.exists():
             return "transcript file is missing"
         try:
@@ -390,7 +421,7 @@ def _needs_rerun(case_id: str, entry: Optional[Dict[str, Any]], batch_dir: Path,
 
 
 def _reconcile_with_disk(batch_dir: Path, in_scope: List[Dict[str, Any]],
-                         prior: Dict[str, Dict[str, Any]]) -> List[str]:
+                         prior: Dict[str, Dict[str, Any]], repeat: int = 1) -> List[str]:
     """
     Rebuild the manifest's case entries from the transcripts actually on disk.
 
@@ -405,22 +436,23 @@ def _reconcile_with_disk(batch_dir: Path, in_scope: List[Dict[str, Any]],
         again.
 
     The transcript file is the ground truth, so every entry is refreshed from it.
-    Mutates `prior` and returns the ids that changed.
+    Mutates `prior` (keyed by run_key) and returns the run keys that changed.
     """
     changed: List[str] = []
     for case in in_scope:
-        cid = case["id"]
-        path = batch_dir / f"{cid}.json"
-        if not path.exists():
-            continue
-        try:
-            transcript = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue  # unreadable: leave it to be re-run
-        entry = _entry(cid, transcript, path)
-        if prior.get(cid) != entry:
-            changed.append(cid)
-            prior[cid] = entry
+        for sample in range(1, repeat + 1):
+            key = run_key(case["id"], sample)
+            path = batch_dir / f"{key}.json"
+            if not path.exists():
+                continue
+            try:
+                transcript = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue  # unreadable: leave it to be re-run
+            entry = _entry(case["id"], transcript, path, sample)
+            if prior.get(key) != entry:
+                changed.append(key)
+                prior[key] = entry
     return changed
 
 
@@ -509,19 +541,22 @@ def resume_suite(
 
     all_cases = load_library(library)
     in_scope = select_cases(all_cases, manifest.get("categories"), manifest.get("selected_ids"))
-    prior = {e["id"]: e for e in manifest.get("cases", [])}
-    reconciled = _reconcile_with_disk(batch_dir, in_scope, prior)
+    repeat = int(manifest.get("repeat") or 1)
+    prior = {_entry_key(e): e for e in manifest.get("cases", [])}
+    reconciled = _reconcile_with_disk(batch_dir, in_scope, prior, repeat)
     if reconciled:
-        console.print(f"[dim]Reconciled {len(reconciled)} case(s) against the transcripts on disk "
+        console.print(f"[dim]Reconciled {len(reconciled)} run(s) against the transcripts on disk "
                       f"(the manifest was stale or never written): {reconciled}[/dim]")
 
-    todo: List[Dict[str, Any]] = []
+    todo: List[Run] = []
     reasons: Dict[str, str] = {}
     for case in in_scope:
-        why = _needs_rerun(case["id"], prior.get(case["id"]), batch_dir, redo_empty, redo_ids)
-        if why:
-            todo.append(case)
-            reasons[case["id"]] = why
+        for sample in range(1, repeat + 1):
+            key = run_key(case["id"], sample)
+            why = _needs_rerun(case["id"], prior.get(key), batch_dir, redo_empty, redo_ids, sample)
+            if why:
+                todo.append((case, sample))
+                reasons[key] = why
 
     # A --redo id outside this batch's scope would otherwise do nothing at all,
     # silently, and look like the re-run happened.
@@ -531,12 +566,12 @@ def resume_suite(
                       f"(variant {variant}, {library.name}). Ignored.[/yellow]")
 
     console.print(f"[bold]Resuming[/bold] {batch_dir.name} - variant [cyan]{variant}[/cyan], "
-                  f"{len(prior)}/{len(in_scope)} case(s) already present.")
+                  f"{len(prior)}/{len(in_scope) * repeat} run(s) already present.")
     if not todo:
         console.print("[green]✓ Nothing to re-run; this batch is already complete.[/green]")
         return manifest_path
-    for cid in sorted(reasons):
-        console.print(f"  [yellow]↻[/yellow] {cid:<7} {reasons[cid]}")
+    for key in sorted(reasons):
+        console.print(f"  [yellow]↻[/yellow] {key:<10} {reasons[key]}")
 
     problems = preflight(subject)
     if problems:
@@ -546,15 +581,16 @@ def resume_suite(
 
     new_entries = _execute_cases(todo, variant, batch_dir, workers, on_result,
                                  f"[cyan]{variant}[/cyan] × {library.stem} [dim](resume)[/dim]",
-                                 subject)
+                                 subject, repeat)
 
-    merged = {**prior, **{e["id"]: e for e in new_entries}}
-    entries = sorted(merged.values(), key=lambda e: e["id"])
+    merged = {**prior, **{_entry_key(e): e for e in new_entries}}
+    entries = sorted(merged.values(), key=lambda e: (e["id"], int(e.get("sample", 1))))
     manifest.update({
         "ts": int(time.time()),
         "agent_model": current_model,
         "case_count": len(in_scope),
-        "complete": len(entries) == len(in_scope),
+        "repeat": repeat,
+        "complete": len(entries) == len(in_scope) * repeat,
         "cases": entries,
     })
     # The batch-level image is the one it started with; a mixed batch shows in
@@ -582,7 +618,7 @@ def _summarise(manifest_path: Path) -> None:
     table.add_column("Elapsed")
     for e in manifest["cases"]:
         color = "green" if e["status"] == "completed" else "red"
-        table.add_row(e["id"], f"[{color}]{e['status']}[/{color}]", f"{e.get('elapsed_seconds') or '?'}s")
+        table.add_row(_entry_key(e), f"[{color}]{e['status']}[/{color}]", f"{e.get('elapsed_seconds') or '?'}s")
     console.print(table)
 
     # One batch must mean one model, or its numbers cannot be compared. A resumed
@@ -614,6 +650,9 @@ def main(
     category: Optional[List[str]] = typer.Option(None, help="Only these categories (repeatable)."),
     cases: Optional[str] = typer.Option(None, help="Comma-separated case IDs to run."),
     workers: int = typer.Option(int(os.getenv("GATE_WORKERS", "2")), help="Parallel sandbox containers."),
+    repeat: int = typer.Option(1, "--repeat", min=1, max=MAX_REPEAT,
+                               help="Run every case this many times; a case FAILs if any run does. "
+                                    "Multiplies agent (and judge) cost."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate the library only; start no containers."),
     resume: Optional[Path] = typer.Option(None, "--resume", metavar="BATCH_DIR",
                                           help="Finish an existing batch instead of starting a new one: "
@@ -706,7 +745,7 @@ def main(
         raise typer.Exit(code=2)
 
     manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
-                              subject=subject)
+                              subject=subject, repeat=repeat)
     _summarise(manifest_path)
 
 

@@ -144,6 +144,10 @@
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: the status the agent reported, kept when the harness overruled it (contract_error, container_error, harness_error)."
     },
+    "sample": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: which run of the case this was, when the batch ran every case several times (--repeat)."
+    },
     "contract_violations": {
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: why a transcript that declared schema_version failed this schema. Present only with status contract_error."

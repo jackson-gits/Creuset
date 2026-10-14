@@ -110,7 +110,7 @@ CONTRACT_ENV: Dict[str, str] = {
 HARNESS_OWNED_FIELDS: Tuple[str, ...] = (
     "test_id", "run_id", "variant", "elapsed_seconds", "service_audit",
     "audit_source", "agent_image", "agent_image_id", "stderr",
-    "exit_code", "world_fixtures", "reported_status", "contract_violations",
+    "exit_code", "world_fixtures", "reported_status", "contract_violations", "sample",
 )
 
 

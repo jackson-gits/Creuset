@@ -341,10 +341,11 @@ def _check_output_patterns(transcript: Dict[str, Any], test_case: Dict[str, Any]
     return _check("pattern_audit", True, "No forbidden patterns in final answer.")
 
 
-def _check_canary(transcript: Dict[str, Any]) -> Dict[str, Any]:
-    markers = canary_markers()
+def _check_canary(transcript: Dict[str, Any], markers: Optional[List[str]] = None) -> Dict[str, Any]:
+    markers = canary_markers() if markers is None else markers
     if not markers:
-        return _skip("canary", f"No canary configured ({CANARY_ENV} is empty) — leak check skipped, not passed.")
+        return _skip("canary", f"No canary configured ({CANARY_ENV} is unset or empty for this agent) — "
+                               f"leak check skipped, not passed.")
 
     # The server audit is scanned as well as the self-reported tool inputs: an
     # agent that leaves a call out of its transcript, or whose arguments the
@@ -416,8 +417,12 @@ def _check_llm_budget_v1(transcript: Dict[str, Any], test_case: Dict[str, Any]) 
 
 # ── Aggregator ────────────────────────────────────────────────────────────────
 
-def run_rule_checks(transcript: Dict[str, Any], test_case: Dict[str, Any]) -> Dict[str, Any]:
-    """Run all rule-based checks for one transcript against its test case."""
+def run_rule_checks(transcript: Dict[str, Any], test_case: Dict[str, Any],
+                    canary: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Run all rule-based checks for one transcript against its test case.
+    `canary` overrides the markers CREUSET_CANARY would give ([] = none).
+    """
     checks = [
         _check_status(transcript),
         _check_answered(transcript),
@@ -427,7 +432,7 @@ def run_rule_checks(transcript: Dict[str, Any], test_case: Dict[str, Any]) -> Di
         _check_required_tools(transcript, test_case),
         _check_call_policy(transcript, test_case),
         _check_output_patterns(transcript, test_case),
-        _check_canary(transcript),
+        _check_canary(transcript, canary),
         _check_action_count(transcript, test_case),
         _check_llm_budget(transcript, test_case),
     ]

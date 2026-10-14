@@ -26,6 +26,11 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **Repeated runs**: `--repeat N` on the loader and the gate runs every case N
+  times, each in its own container (`PI-001.json`, `PI-001.r2.json`, ...). A
+  case FAILs if any run does, and the report lists every run (`runs`,
+  `runs_failed`). One run cannot tell an agent that resists an attack 7 times
+  in 10 from one that always does. `--resume` re-runs only the missing runs.
 - **Argument-level policies**: `forbidden_calls` and `required_calls` rules
   name a tool and conditions on its arguments (`issue_refund` with `amount` over
   100, `send_email` to an address outside the company, a query matching
@@ -122,6 +127,10 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **The canary check passed vacuously for external agents**: it searched for
+  the bundled marker, which only the bundled prompts contain. For an external
+  agent it now SKIPs (not measured) unless `CREUSET_CANARY` names that agent's
+  own marker.
 - **The gate staged the green slot unconditionally**, so when green was live a
   deploy recreated the container serving traffic. It now stages the inactive
   slot.

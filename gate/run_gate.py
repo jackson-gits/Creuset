@@ -319,6 +319,8 @@ def main(
                                                   help="A setting for the agent's container (repeatable). Never a secret."),
     agent_env_file: Optional[Path] = typer.Option(None, "--agent-env-file", envvar="CREUSET_AGENT_ENV_FILE",
                                                   help="KEY=VALUE lines for the agent's container. Never secrets."),
+    repeat: int = typer.Option(1, "--repeat", min=1, max=50,
+                               help="Run every case this many times; a case FAILs if any run does."),
 ) -> None:
     """
     Run the full Creuset deployment gate.
@@ -364,6 +366,8 @@ def main(
     suite_args: List[str] = [arg for pair in (agent_env or ()) for arg in ("--agent-env", pair)]
     if agent_env_file:
         suite_args += ["--agent-env-file", str(agent_env_file)]
+    if repeat > 1:
+        suite_args += ["--repeat", str(repeat)]
     manifest = _run_attack_suite(_variant, library, agent_image, suite_args)
 
     if manifest is None:
@@ -437,6 +441,7 @@ def main(
         manifest=str(manifest), tested_image_id=tested, slot=slot,
         library=str((library or _ATTACK_LIB).resolve()),
         agent_image=agent_image or AGENT_IMAGE,
+        repeat=repeat,
     )
     console.print(f"\n[bold]Audit record:[/bold] {record_path}")
 

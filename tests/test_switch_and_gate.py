@@ -284,3 +284,12 @@ def test_agent_settings_that_touch_the_contract_are_rejected_up_front(gate_env):
                                           "--agent-env", "OPENAI_BASE_URL=http://elsewhere"])
     assert result.exit_code == 2 and calls["suite"] == []
     assert "OPENAI_BASE_URL" in _records(logs)[0]["error"]
+
+
+def test_repeat_passes_through_and_is_recorded(gate_env, monkeypatch):
+    logs, calls = gate_env
+    _scorer(monkeypatch)
+    result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--dry-run", "--repeat", "5"])
+    assert result.exit_code == 0, result.output
+    assert calls["suite_args"][-2:] == ["--repeat", "5"]
+    assert _records(logs)[0]["repeat"] == 5

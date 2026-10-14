@@ -167,8 +167,10 @@ def _batch(tmp_path, monkeypatch, ids=(IMAGE,), subject=None):
     monkeypatch.setenv("AGENT_MODEL", "m")
     ran = []
     monkeypatch.setattr(loader, "preflight", lambda *a: [])
-    monkeypatch.setattr(loader, "_execute_cases", lambda todo, *a, **k: ran.extend(c["id"] for c in todo) or [
-        {"id": c["id"], "status": "completed", "transcript": "x", "agent_image_id": IMAGE} for c in todo])
+    monkeypatch.setattr(loader, "_execute_cases", lambda todo, *a, **k: ran.extend(
+        loader.run_key(c["id"], n) for c, n in todo) or [
+        {"id": c["id"], "status": "completed", "transcript": "x", "agent_image_id": IMAGE,
+         **({"sample": n} if n > 1 else {})} for c, n in todo])
     return batch, ran
 
 
