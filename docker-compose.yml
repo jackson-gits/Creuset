@@ -23,6 +23,10 @@
 #   docker compose build
 #   docker compose up -d llm-proxy mock-services   # needed for gate runs
 #   docker compose up -d                           # + blue/green slots + router
+#
+# Native Linux: the slots write ./logs/live_traffic as CREUSET_UID:CREUSET_GID
+# (default 10001:10001, the image's user). Set them to your `id -u` / `id -g`
+# so that directory is writable; otherwise the slots report unhealthy.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: creuset
@@ -36,24 +40,42 @@ networks:
     name: creuset-edge
     driver: bridge
 
-# Environment shared by every agent container. Mirrors what
-# sandbox/run_test.py passes to one-shot test containers.
+# Environment shared by every agent container. The same names and defaults as
+# sandbox/run_test.py _container_env() passes to the one-shot containers the gate
+# tests, so a slot runs the configuration that passed — a setting missing here
+# would silently fall back to the agent's own default in production only.
+# (CREUSET_RUN_ID and CREUSET_TOOLS_URL are per test run; serve.py makes its own
+# run id per request.) tests/test_serve.py holds the two in step.
 x-agent-env: &agent-env
   OPENAI_API_BASE: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
+  # The name the official openai SDK reads; neutral for the bundled agent.
+  OPENAI_BASE_URL: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
   OPENAI_API_KEY: sandbox-placeholder-key   # real key is injected by llm-proxy
   AGENT_MODEL: ${AGENT_MODEL:?set AGENT_MODEL in .env}
   MOCK_SERVICES_HOST: mock-services
   MOCK_SERVICES_PORT: "8001"
   MAX_LLM_CALLS: ${MAX_LLM_CALLS:-15}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-8}
   AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-700}
+  FINALIZER_MAX_TOKENS: ${FINALIZER_MAX_TOKENS:-1024}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-90}
   LIVE_TRAFFIC_DIR: /app/live_traffic
 
 x-agent-slot: &agent-slot
   build:
     context: ./agent
-  image: creuset-agent:latest
+  # The tag the harness runs as the bundled agent (sandbox/run_test.py
+  # bundled_image_ref), so `docker compose build agent-blue` rebuilds the image
+  # the gate tests and the slots serve — under one name, whatever it is.
+  image: ${AGENT_IMAGE_TAG:-creuset-agent:latest}
   entrypoint: ["uvicorn", "serve:app", "--host", "0.0.0.0", "--port", "8000"]
   command: []
+  # The uid that writes ./logs/live_traffic. Docker Desktop (Windows, macOS)
+  # hides host ownership, so the image's own uid works there. Native Linux keeps
+  # it: a checkout owned by you is not writable by 10001, and the monitor would
+  # watch an empty directory. There, set CREUSET_UID/CREUSET_GID to `id -u` /
+  # `id -g`. The image's files are world-readable, so any uid can run it.
+  user: "${CREUSET_UID:-10001}:${CREUSET_GID:-10001}"
   networks:
     - creuset-net
   read_only: true
@@ -65,6 +87,15 @@ x-agent-slot: &agent-slot
     - no-new-privileges:true
   volumes:
     - ./logs/live_traffic:/app/live_traffic
+  # /health is 503 while the slot cannot write live traffic (agent/serve.py),
+  # so `up --wait` — and the gate's staging step — fail rather than deploy a
+  # slot the monitor cannot see. The image's own Python rather than curl, so
+  # the check does not depend on curl being installed.
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+    interval: 5s
+    timeout: 3s
+    retries: 5
   deploy:
     resources:
       limits:
@@ -144,6 +175,10 @@ services:
       context: ./sandbox/mock_services
     image: creuset-mock-services:latest
     container_name: mock-services
+    environment:
+      # 1 = refuse tool calls for a run nobody initialised (no shared world).
+      # Anything but 1/0/true/false/yes/no/on/off stops it from starting.
+      MOCK_STRICT_RUNS: ${MOCK_STRICT_RUNS:-0}
     networks:
       - creuset-net
     # Holds the audit log the judge treats as ground truth, and shares a network
@@ -162,7 +197,9 @@ services:
           pids: 128
           cpus: "0.50"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      # The image's own Python rather than curl, so the check does not depend
+      # on curl being installed.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -206,7 +243,10 @@ services:
       - "127.0.0.1:${ROUTER_HOST_PORT:-8081}:8080"
     environment:
       ROUTER_PORT: "8080"
-      STATE_FILE: /app/state/state.json
+      STATE_FILE: /app/state/state.json   # wins over CREUSET_STATE_DIR
+      # /invoke runs a whole agent scenario, which can outlast 30 s on a slow or
+      # rate-limited model. Must be a positive number, or the router will not start.
+      ROUTER_UPSTREAM_TIMEOUT: ${ROUTER_UPSTREAM_TIMEOUT:-30}
     volumes:
       - ./deploy/state:/app/state:ro   # router reads the active slot live
     read_only: true
