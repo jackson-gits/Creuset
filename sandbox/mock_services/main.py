@@ -42,6 +42,16 @@ Generic tools
   world. The six legacy endpoints keep their exact audit keys, with no `tool`:
   the judge prints every key, so a new one would change its prompt.
 
+REST mock
+  Any method on /http/{api}/{path} (or /r/{run_id}/http/...) stands in for an
+  HTTP API the agent calls, so an agent whose tools take a base URL from its
+  configuration needs no code change: point that URL at
+  $CREUSET_MOCK_URL/http/<api>. Every request is recorded — {ts, action:
+  "http_request", tool: <api>, method, path, query, body} — and answered from
+  the run's `http_responses` for that api: the first rule whose method and
+  path match, else 404. The api name is the "tool" the rule layer and the
+  argument policies see.
+
 Ground truth
   GET /audit/log?run=<id> returns every service action the run performed.
   The judge treats this server-side log as authoritative evidence of what the
@@ -64,10 +74,11 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 app = FastAPI(title="Creuset Mock Services", version="2.0.0")
@@ -80,6 +91,9 @@ _MAX_RUNS = 2000  # oldest run worlds are evicted beyond this
 # at most 64), plus dots for MCP-style namespaced tools (`files.read`). It may
 # not start with "-" or ".": names end up in URLs, logs and command lines.
 _TOOL_NAME = r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$"
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+_MAX_HTTP_RULES = 64           # per api, per run
+_MAX_HTTP_APIS = 16
 _MAX_RESPONSES = 64            # canned tool responses per run
 _MAX_JSON_BYTES = 64 * 1024    # per canned response, and per generic tool call's args
 _CLIPPED_ARGS_CHARS = 2000     # what an oversized call's args are recorded as
@@ -209,12 +223,14 @@ _FIXTURES: Dict[str, Dict[str, Any]] = {
 
 class _World:
     def __init__(self, fixtures: Optional[List[str]] = None,
-                 responses: Optional[Dict[str, Any]] = None) -> None:
+                 responses: Optional[Dict[str, Any]] = None,
+                 http_responses: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
         self.files: Dict[str, str] = dict(_BASE_FILES)
         self.db: List[Dict[str, Any]] = copy.deepcopy(_BASE_DB)
         self.audit: List[Dict[str, Any]] = []
         self.fixtures: List[str] = []
         self.responses: Dict[str, Any] = copy.deepcopy(responses or {})
+        self.http_responses: Dict[str, List[Dict[str, Any]]] = copy.deepcopy(http_responses or {})
         for name in fixtures or []:
             fx = _FIXTURES.get(name)
             if fx is None:
@@ -296,6 +312,8 @@ class RunInit(BaseModel):
 
     fixtures: List[str] = []
     responses: Dict[str, Any] = {}  # generic tool name → the JSON it answers with
+    # REST mock: api name → rules {method, path | path_matches, status, body}
+    http_responses: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def _check_responses(responses: Dict[str, Any]) -> None:
@@ -309,6 +327,45 @@ def _check_responses(responses: Dict[str, Any]) -> None:
                                 detail=f"Canned response for {name} exceeds {_MAX_JSON_BYTES} bytes.")
 
 
+def _check_http_responses(apis: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Every rule usable as written; otherwise 400 before any world exists."""
+    if len(apis) > _MAX_HTTP_APIS:
+        raise HTTPException(status_code=400, detail=f"At most {_MAX_HTTP_APIS} mocked APIs per run.")
+    for api, rules in apis.items():
+        if not re.fullmatch(_TOOL_NAME, api):
+            raise HTTPException(status_code=400, detail=f"Invalid api name in http_responses: {api!r}")
+        if not isinstance(rules, list) or len(rules) > _MAX_HTTP_RULES:
+            raise HTTPException(status_code=400, detail=f"http_responses[{api!r}]: a list of at most "
+                                                        f"{_MAX_HTTP_RULES} rules")
+        for rule in rules:
+            problem = _http_rule_problem(rule)
+            if problem:
+                raise HTTPException(status_code=400, detail=f"http_responses[{api!r}]: {problem}")
+
+
+def _http_rule_problem(rule: Any) -> Optional[str]:
+    if not isinstance(rule, dict) or set(rule) - {"method", "path", "path_matches", "status", "body"}:
+        return f"a rule has only method, path or path_matches, status and body: {rule!r}"[:300]
+    method = str(rule.get("method", "GET")).upper()
+    if method != "*" and method not in _HTTP_METHODS:
+        return f"unknown method {rule.get('method')!r}"
+    if "path" in rule and "path_matches" in rule:
+        return "a rule has path or path_matches, not both"
+    if "path" in rule and not str(rule["path"]).startswith("/"):
+        return f"path {rule['path']!r} must start with /"
+    if "path_matches" in rule:
+        try:
+            re.compile(rule["path_matches"])
+        except (re.error, TypeError) as e:
+            return f"path_matches {rule['path_matches']!r}: {e}"
+    status = rule.get("status", 200)
+    if not isinstance(status, int) or isinstance(status, bool) or not 100 <= status <= 599:
+        return f"status {status!r} is not an HTTP status"
+    if _json_size(rule.get("body")) > _MAX_JSON_BYTES:
+        return f"a body exceeds {_MAX_JSON_BYTES} bytes"
+    return None
+
+
 def _init_conflict(world: _World, body: RunInit) -> Optional[str]:
     """Why `body` cannot be a repeat of the init that made `world`, or None."""
     if sorted(body.fixtures) != sorted(world.fixtures):
@@ -317,6 +374,8 @@ def _init_conflict(world: _World, body: RunInit) -> Optional[str]:
     # with its fixtures only, after the harness has set both.
     if body.responses and body.responses != world.responses:
         return "canned responses"
+    if body.http_responses and body.http_responses != world.http_responses:
+        return "canned HTTP responses"
     return None
 
 
@@ -339,8 +398,9 @@ async def init_run(run_id: str, body: RunInit) -> Dict[str, Any]:
     a different one is a 409, and the audit log is never reset.
     """
     _check_responses(body.responses)
+    _check_http_responses(body.http_responses)
     try:
-        candidate = _World(body.fixtures, body.responses)
+        candidate = _World(body.fixtures, body.responses, body.http_responses)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"Unknown fixture: {e.args[0]}")
     with _lock:
@@ -522,6 +582,54 @@ async def call_tool(
     if name in world.responses:
         return copy.deepcopy(world.responses[name])
     return {"status": "ok"}
+
+
+# ── REST mock ────────────────────────────────────────────────────────────────
+
+def _http_answer(world: _World, api: str, method: str, path: str) -> Tuple[int, Any]:
+    """The first canned rule for (method, path) on this api, else a 404."""
+    for rule in world.http_responses.get(api, []):
+        wanted = str(rule.get("method", "GET")).upper()
+        if wanted not in ("*", method):
+            continue
+        if "path" in rule and rule["path"] != path:
+            continue
+        if "path_matches" in rule and not re.fullmatch(rule["path_matches"], path):
+            continue
+        return int(rule.get("status", 200)), copy.deepcopy(rule.get("body"))
+    return 404, {"error": f"no canned response for {method} {path} on {api}"}
+
+
+@agent.api_route("/http/{api}/{path:path}", methods=list(_HTTP_METHODS))
+async def http_mock(
+    request: Request,
+    api: str = Path(pattern=_TOOL_NAME),
+    path: str = Path(...),
+    run: str = Depends(_run_id),
+) -> Any:
+    """
+    Stand-in for an HTTP API the agent calls. Recorded, then answered from the
+    run's http_responses. No world side effects: a DELETE deletes nothing, and
+    the audit says it was attempted, which is what the rule layer needs.
+    """
+    world = _world_for(run)
+    raw = await request.body()
+    body: Any = None
+    if raw:
+        if len(raw) > _MAX_JSON_BYTES:
+            body = {"_clipped": raw[:_CLIPPED_ARGS_CHARS].decode("utf-8", "replace")}
+        else:
+            text = raw.decode("utf-8", "replace")
+            try:
+                body = json.loads(text)
+            except ValueError:
+                body = text
+    method = request.method.upper()
+    full_path = "/" + unquote(path).lstrip("/")
+    _log(world, "http_request", {"tool": api, "method": method, "path": full_path,
+                                 "query": dict(request.query_params), "body": body})
+    status, answer = _http_answer(world, api, method, full_path)
+    return JSONResponse(status_code=status, content=answer)
 
 
 # Mounted after every @agent route above: many FastAPI releases copy a router's

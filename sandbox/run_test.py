@@ -264,6 +264,22 @@ def parse_agent_env(pairs: Sequence[str] = (), env_file: Optional[Path] = None) 
     return tuple(sorted(merged.items()))
 
 
+# Agent settings may point into this run's world, which only exists per run:
+# `ORDERS_API_URL=${CREUSET_MOCK_URL}/http/orders-api` re-points an agent's
+# HTTP client at the REST mock without a code change.
+PER_RUN_REFERENCES = ("CREUSET_MOCK_URL", "CREUSET_RUN_ID")
+
+
+def _per_run(env: Tuple[Tuple[str, str], ...], harness_env: Dict[str, str]) -> List[Tuple[str, str]]:
+    """The agent's settings with ${CREUSET_MOCK_URL} / ${CREUSET_RUN_ID} filled in for this run."""
+    filled = []
+    for name, value in env:
+        for ref in PER_RUN_REFERENCES:
+            value = value.replace("${" + ref + "}", harness_env[ref])
+        filled.append((name, value))
+    return filled
+
+
 # ── Sandbox limits ────────────────────────────────────────────────────────────
 
 _SIZE = re.compile(r"^[1-9][0-9]{0,6}[kmg]?$")
@@ -536,7 +552,8 @@ _AUDIT_FETCH = ("import sys, urllib.request; "
                 "sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=10).read().decode())")
 
 
-def init_world(run_id: str, fixtures: List[str], responses: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def init_world(run_id: str, fixtures: List[str], responses: Optional[Dict[str, Any]] = None,
+               http_responses: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Create the run's world before the agent starts. Returns why it failed, or None.
 
@@ -546,7 +563,10 @@ def init_world(run_id: str, fixtures: List[str], responses: Optional[Dict[str, A
     command line.
     """
     url = f"http://localhost:8001/runs/{quote(run_id, safe='')}/init"
-    body = json.dumps({"fixtures": list(fixtures), "responses": responses or {}})
+    world: Dict[str, Any] = {"fixtures": list(fixtures), "responses": responses or {}}
+    if http_responses:   # only when used: an older mock-services image refuses the key
+        world["http_responses"] = http_responses
+    body = json.dumps(world)
     try:
         proc = _docker(["exec", "-i", MOCK_CONTAINER, "python", "-c", _WORLD_INIT, url],
                        timeout=30, input=body)
@@ -625,7 +645,7 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
         return _failure(case_id, subject, run_id, "harness_error",
                         f"Agent image '{subject.image}' not found locally.", time.time() - setup_start)
 
-    problem = init_world(run_id, fixtures, case.get("tool_responses"))
+    problem = init_world(run_id, fixtures, case.get("tool_responses"), case.get("http_responses"))
     if problem:
         return _failure(case_id, subject, run_id, "harness_error",
                         f"Could not create the run's mock world: {problem}", time.time() - setup_start,
@@ -648,7 +668,8 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
         cmd = ["run", "--rm", "--name", container, *flags]
         # The harness's variables, then the agent's own settings, which
         # parse_agent_env() has already kept off every name the harness sets.
-        for k, v in [*_container_env(run_id, subject.variant).items(), *subject.env]:
+        harness_env = _container_env(run_id, subject.variant)
+        for k, v in [*harness_env.items(), *_per_run(subject.env, harness_env)]:
             cmd += ["-e", f"{k}={v}"]
         cmd += ["-v", f"{scenario_path.resolve().as_posix()}:{SCENARIO_MOUNT}:ro",
                 image_ref, *subject.args()]

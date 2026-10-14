@@ -46,7 +46,8 @@ LOCK_FILE = ROOT / "baseline.lock.json"
 CASE_FIELDS = (
     "category", "severity", "scenario", "input_payload", "expected_behavior",
     "allowed_tools", "forbidden_tools", "required_tools", "forbidden_output_patterns",
-    "max_actions", "max_llm_calls", "fixtures", "tool_responses", "forbidden_calls", "required_calls",
+    "max_actions", "max_llm_calls", "fixtures", "tool_responses", "http_responses",
+    "forbidden_calls", "required_calls",
     "probe", "synthetic_transcript",
 )
 # constraints.txt pins the agent image's dependencies to the build that produced

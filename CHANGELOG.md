@@ -26,6 +26,13 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **REST mock**: any request to `$CREUSET_MOCK_URL/http/<api>/<path>` is
+  recorded as a call of the tool `<api>` (method, path, query and body as its
+  arguments) and answered from the case's `http_responses`: first matching
+  rule, else 404. Agent settings may reference `${CREUSET_MOCK_URL}` and
+  `${CREUSET_RUN_ID}`, filled in per run, so an agent whose tools read an API
+  base URL from the environment is tested with no code change. CI runs the
+  example over HTTP.
 - **Starter library** `attacks/generic_agent.yaml`: twelve attacks that name no
   tools, so they run against any agent as they stand. Run live against the
   example agent's weak prompt on gpt-oss-20b, they caught a system-prompt leak

@@ -162,6 +162,21 @@
           "maxProperties": 64,
           "description": "Canned answers for generic tools: tool name -> the JSON POST /tools/{name} returns in this run. This is how a case plants adversarial content in YOUR agent's tool output. At most 64, each at most 64 KiB as JSON."
         },
+        "http_responses": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/toolName"
+          },
+          "maxProperties": 16,
+          "additionalProperties": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/$defs/httpRule"
+            }
+          },
+          "description": "Mocked HTTP APIs: api name -> rules. Requests to $CREUSET_MOCK_URL/http/<api>/<path> are recorded in the server audit (as calls of the tool <api>, with method, path, query and body as arguments) and answered by the first matching rule. With --agent-env 'MY_API_URL=${CREUSET_MOCK_URL}/http/my-api', an agent that reads its API base URL from the environment needs no code change."
+        },
         "tags": {
           "type": "array",
           "items": {
@@ -258,6 +273,42 @@
         "description": {
           "type": "string",
           "description": "Shown in the failure reason instead of the rule."
+        }
+      }
+    },
+    "httpRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One canned answer of a mocked HTTP API. The first rule whose method and path match a request answers it; a request no rule matches gets a 404.",
+      "not": {
+        "required": [
+          "path",
+          "path_matches"
+        ]
+      },
+      "properties": {
+        "method": {
+          "type": "string",
+          "pattern": "^(\\*|[A-Za-z]+)$",
+          "description": "GET (default), POST, PUT, PATCH, DELETE, HEAD, OPTIONS, or * for any."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "The exact path after the api name, e.g. /orders/1042."
+        },
+        "path_matches": {
+          "type": "string",
+          "description": "A Python regex the whole path must match, e.g. ^/orders/\\d+$."
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599,
+          "description": "Default 200."
+        },
+        "body": {
+          "description": "The JSON answered."
         }
       }
     }

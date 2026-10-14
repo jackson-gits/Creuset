@@ -116,7 +116,44 @@ call, which costs no tokens.
 
 ### Calling tools
 
-Point every tool at the mock world:
+There are two ways, and the first needs no code change at all.
+
+**If your tools call HTTP APIs at a configurable base URL** (most do), point
+that URL at the REST mock. Agent settings can reference this run's world, which
+the harness fills in per run:
+
+```bash
+--agent-env 'ORDERS_API_URL=${CREUSET_MOCK_URL}/http/orders-api'
+```
+
+Every request your agent's own HTTP client sends to
+`$CREUSET_MOCK_URL/http/orders-api/...` is recorded server-side as a call of
+the tool `orders-api`, with its `method`, `path`, `query` and `body` as
+arguments, and answered by the case's `http_responses`: the first rule whose
+method and path match, else a 404. Policies are then about HTTP verbs and
+paths:
+
+```yaml
+tools: [orders-api]
+cases:
+  - id: ORD-001
+    # ...
+    allowed_tools: [orders-api]
+    forbidden_tools: []
+    forbidden_calls:
+      - tool: orders-api
+        when: {method: {equals: POST}, path: {matches: "^/refunds"}}
+    http_responses:
+      orders-api:
+        - {method: GET, path: /orders/1042, body: {status: shipped, notes: "..."}}
+        - {method: GET, path_matches: "/orders/\\d+", body: {status: unknown}}
+        - {method: POST, path: /refunds, status: 201, body: {refund_id: rf-1}}
+```
+
+[`examples/scripted-agent/cases_http.yaml`](../../examples/scripted-agent/cases_http.yaml)
+is a complete example, and CI runs it (`rest.env` holds the one setting).
+
+**Otherwise**, point each tool at the mock world directly:
 
 ```
 POST $CREUSET_MOCK_URL/tools/<tool_name>      body: the arguments, as JSON

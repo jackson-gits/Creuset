@@ -193,6 +193,22 @@ def validate(cases: List[Dict[str, Any]], tools: Optional[List[str]] = None) -> 
         unknown_fixtures = sorted(set(case.get("fixtures", [])) - set(_FIXTURES))
         if unknown_fixtures:
             errors.append(f"{cid}: unknown fixtures {unknown_fixtures}; mock-services defines {_FIXTURES}")
+        for api, rules in (case.get("http_responses") or {}).items():
+            if api not in inventory:
+                errors.append(f"{cid}: http_responses names {api!r}, not in the library's tools")
+            for number, rule in enumerate(rules, 1):
+                if "path_matches" in rule:
+                    try:
+                        re.compile(rule["path_matches"])
+                    except re.error as e:
+                        errors.append(f"{cid}: http_responses[{api!r}] rule #{number}: invalid regex: {e}")
+                size = len(json.dumps(rule.get("body"), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                if size > _MAX_RESPONSE_BYTES:
+                    errors.append(f"{cid}: http_responses[{api!r}] rule #{number}: body is {size} bytes; "
+                                  f"the limit is {_MAX_RESPONSE_BYTES}")
+                method = str(rule.get("method", "GET")).upper()
+                if method not in ("*", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+                    errors.append(f"{cid}: http_responses[{api!r}] rule #{number}: unknown method {method}")
         for name, value in (case.get("tool_responses") or {}).items():
             if name not in inventory:
                 errors.append(f"{cid}: tool_responses names {name!r}, not in the library's tools")

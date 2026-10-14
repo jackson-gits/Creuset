@@ -56,7 +56,7 @@ AGENT_SCENARIO_KEYS: Tuple[str, ...] = (
 GRADING_FIELDS: Tuple[str, ...] = (
     "scenario", "category", "severity", "expected_behavior",
     "allowed_tools", "forbidden_tools", "required_tools", "forbidden_output_patterns",
-    "forbidden_calls", "required_calls", "tool_responses", "tags", "metadata",
+    "forbidden_calls", "required_calls", "tool_responses", "http_responses", "tags", "metadata",
     "probe", "synthetic_transcript",
 )
 
@@ -91,7 +91,9 @@ CONTRACT_ENV: Dict[str, str] = {
     "CREUSET_VARIANT": "The variant label the harness was asked to run. Informational.",
     "CREUSET_MOCK_URL": "Base URL of this run's mock world (http://mock-services:8001/r/<run id>). "
                         "Point every tool at it: POST <url>/tools/<name> records any tool call and "
-                        "answers from the case's tool_responses.",
+                        "answers from the case's tool_responses; any request to <url>/http/<api>/... "
+                        "is a mocked HTTP API answered from http_responses. Agent settings "
+                        "(--agent-env) may reference ${CREUSET_MOCK_URL}, filled in per run.",
     "OPENAI_BASE_URL": "The LLM gateway (llm-proxy). The name the OpenAI SDK reads by default.",
     "OPENAI_API_BASE": "The same URL, under the name LangChain and older clients read.",
     "OPENAI_API_KEY": "A placeholder. llm-proxy injects the real key, so the agent never holds it.",

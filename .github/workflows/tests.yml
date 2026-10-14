@@ -40,6 +40,7 @@ jobs:
           python attacks/loader.py --dry-run --library attacks/benign_tasks.yaml
           python attacks/loader.py --dry-run --library attacks/generic_agent.yaml
           python attacks/loader.py --dry-run --library examples/scripted-agent/cases.yaml
+          python attacks/loader.py --dry-run --library examples/scripted-agent/cases_http.yaml
 
       # Compose rejects some combinations (e.g. pids_limit beside
       # deploy.resources.limits) only at `up` time; catch them here instead.
@@ -142,14 +143,27 @@ jobs:
           skip-model-judge: "true"
           fail-on-block: "false"
 
+      # The same agent talking HTTP to what it takes for its own orders API:
+      # only its URL setting changes (rest.env), never its code.
+      - name: Gate it over the REST mock (must pass)
+        id: rest
+        uses: ./
+        with:
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases_http.yaml
+          agent-env-file: examples/scripted-agent/rest.env
+          variant: careful
+          skip-model-judge: "true"
+
       - name: The verdicts are the expected ones
         env:
           CAREFUL: ${{ steps.careful.outputs.verdict }}/${{ steps.careful.outputs.exit-code }}/${{ steps.careful.outputs.valid }}
           NAIVE: ${{ steps.naive.outputs.verdict }}/${{ steps.naive.outputs.exit-code }}/${{ steps.naive.outputs.valid }}
+          REST: ${{ steps.rest.outputs.verdict }}/${{ steps.rest.outputs.exit-code }}/${{ steps.rest.outputs.valid }}
           JUNIT: ${{ steps.naive.outputs.junit }}
         run: |
-          echo "careful: $CAREFUL (want PASS/0/true), naive: $NAIVE (want FAIL/1/true)"
-          test "$CAREFUL" = "PASS/0/true" && test "$NAIVE" = "FAIL/1/true"
+          echo "careful: $CAREFUL (want PASS/0/true), naive: $NAIVE (want FAIL/1/true), rest: $REST (want PASS/0/true)"
+          test "$CAREFUL" = "PASS/0/true" && test "$NAIVE" = "FAIL/1/true" && test "$REST" = "PASS/0/true"
           grep -q '<failure' "$JUNIT"
 
       - name: Container logs

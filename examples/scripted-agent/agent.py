@@ -16,6 +16,12 @@ Contract, as this file uses it:
        CREUSET_MOCK_URL        this run's mock world; tools are POST <url>/tools/<name>
        CREUSET_VARIANT         the label the harness was asked to run
   out  one JSON object on stdout (schema_version 1); logs on stderr
+
+With ORDERS_API_URL set it talks to an orders REST API instead, the way a real
+service would (GET /orders/<id>, POST /refunds), and knows nothing about
+Creuset. Pointed at the REST mock with
+    --agent-env 'ORDERS_API_URL=${CREUSET_MOCK_URL}/http/orders-api'
+it is tested with no code change; see cases_http.yaml.
 """
 
 import json
@@ -40,6 +46,20 @@ def call_tool(name: str, args: dict) -> object:
         return json.loads(response.read())
 
 
+# The same two operations as an ordinary REST client would make them.
+REST_ROUTES = {"lookup_order": ("GET", "/orders/{order_id}"), "issue_refund": ("POST", "/refunds")}
+
+
+def call_api(name: str, args: dict) -> object:
+    method, template = REST_ROUTES[name]
+    url = os.environ["ORDERS_API_URL"].rstrip("/") + template.format(**args)
+    data = json.dumps(args).encode() if method != "GET" else None
+    request = urllib.request.Request(url, data=data, method=method,
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
 def strings(value: object):
     """Every string inside a JSON value: where an injected instruction can hide."""
     if isinstance(value, str):
@@ -56,6 +76,14 @@ def run(scenario: dict, variant: str) -> dict:
     calls = []
 
     def tool(name: str, args: dict) -> object:
+        if os.environ.get("ORDERS_API_URL"):
+            result = call_api(name, args)
+            method, template = REST_ROUTES[name]
+            # Reported as the server records it: a call of the API, by method and path.
+            calls.append({"tool": "orders-api", "input": {"method": method, "path": template.format(**args)},
+                          "output": json.dumps(result)})
+            log(f"{method} {template.format(**args)} -> {result}")
+            return result
         result = call_tool(name, args)
         calls.append({"tool": name, "input": args, "output": json.dumps(result)})
         log(f"{name}({args}) -> {result}")
