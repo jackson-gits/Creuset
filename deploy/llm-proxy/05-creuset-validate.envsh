@@ -1,0 +1,237 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# llm-proxy — provider profile: defaults and validation.
+#
+# Sourced by the nginx image's entrypoint, which sources every executable
+# /docker-entrypoint.d/*.envsh in version order, so this runs BEFORE
+# 20-envsubst-on-templates.sh renders default.conf.template. Everything it
+# exports ends up in the config that holds the real key, so it refuses to start
+# the container on any value it does not understand: a proxy that will not
+# start is a failure the operator sees; one that quietly sends the key
+# somewhere else is not.
+#
+# nginx's envsubst leaves an UNDEFINED variable as literal text, so every
+# variable the template uses gets a value here, whether or not compose passes
+# one. With only LLM_API_KEY, LLM_UPSTREAM_HOST and LLM_PROXY_RESOLVER set (or
+# the rest at compose's defaults), the render is byte-for-byte the config every
+# published result ran behind
+# (tests/snapshots/llm_proxy_default.conf). That is also why the template's
+# comments still describe the default Groq profile: editing them would change
+# the render.
+#
+# If this file is missing or not executable, the computed CREUSET_PROXY_*
+# variables stay literal in the template and nginx refuses the config
+# (unknown directive "${CREUSET_PROXY_AUTH_CLEAR}"), so skipping validation
+# cannot start a proxy either. The file must stay executable (git mode 100755).
+#
+# Settings (from .env via docker-compose.yml; unset or empty = the default):
+#   LLM_UPSTREAM_HOST        required: the one host the key is sent to. Only
+#                            compose supplies a default (api.groq.com).
+#   LLM_UPSTREAM_SCHEME      https (default) | http. http only to a bare
+#                            compose service name (no dot), i.e. a gateway in
+#                            this project: anywhere else the key and every
+#                            prompt would cross the network in clear text.
+#   LLM_UPSTREAM_PORT        default: the scheme's own (443 / 80).
+#   LLM_UPSTREAM_PATH_PREFIX prepended upstream to the path the agent called
+#                            (/v1/... or /openai/v1/..., which the allowlist
+#                            still matches exactly), e.g. /api for OpenRouter:
+#                            /v1/models -> https://openrouter.ai/api/v1/models.
+#   LLM_ALLOWED_ENDPOINTS    chat/completions|models (default); may add
+#                            responses, embeddings, completions. Nothing else:
+#                            files, batches or fine_tuning would hand a hijacked
+#                            agent the account behind the key.
+#   LLM_AUTH_HEADER          Authorization (default), or e.g. api-key, x-api-key.
+#                            With any other header the agent's own Authorization
+#                            is dropped, so only the proxy authenticates.
+#   LLM_AUTH_PREFIX          auth scheme word before the key, space added:
+#                            Bearer with Authorization, none with other headers.
+#   LLM_API_KEY              required unless LLM_UPSTREAM_SCHEME=http (a local
+#                            gateway may take none; then no auth header is sent
+#                            at all). Never printed.
+#   LLM_PROXY_EXTRA_CA_FILE  path INSIDE the container (mount it read-only) of
+#                            extra PEM CA certificates, e.g. a TLS-inspecting
+#                            corporate proxy's. Added to the system bundle, never
+#                            replacing it; verification stays on.
+#   LLM_PROXY_RESOLVER       DNS for nginx's runtime resolver. Docker's embedded
+#                            DNS is 127.0.0.11 (the default). Podman's
+#                            aardvark-dns is not; set `local` to use the
+#                            nameservers in the container's /etc/resolv.conf
+#                            (what the image's own 15-local-resolvers.envsh
+#                            reads), or the network gateway's address.
+# Computed here (a value passed in is overwritten):
+#   CREUSET_PROXY_PORT_SUFFIX, CREUSET_PROXY_TRUSTED_CA, CREUSET_PROXY_AUTH_CLEAR
+#
+# Not supported: a plain-http upstream outside the compose project; an HTTP
+# forward proxy (nginx cannot tunnel through CONNECT); providers whose paths are
+# not <prefix>/v1/<endpoint> or that need a query string (classic Azure
+# deployments with ?api-version=, Gemini's /v1beta/openai).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_creuset_nl='
+'
+
+_creuset_die() {
+    # Sourced, so $0 is the entrypoint's name; use ours. exit (not return)
+    # ends the entrypoint under its `set -e`, so nginx never starts.
+    printf '05-creuset-validate.envsh: ERROR: %s\n' "$*" >&2
+    printf '05-creuset-validate.envsh: refusing to start llm-proxy, which holds the real API key.\n' >&2
+    exit 1
+}
+
+# Whole-value ERE match. A value with a newline is refused first: grep matches
+# line by line, so "ok<newline>; evil" would pass on its first line.
+_creuset_matches() {
+    case "$1" in *"$_creuset_nl"*) return 1 ;; esac
+    printf '%s\n' "$1" | LC_ALL=C grep -Eqx -e "$2"
+}
+
+LLM_UPSTREAM_SCHEME="${LLM_UPSTREAM_SCHEME:-https}"
+LLM_UPSTREAM_PORT="${LLM_UPSTREAM_PORT:-}"
+LLM_UPSTREAM_PATH_PREFIX="${LLM_UPSTREAM_PATH_PREFIX:-}"
+LLM_ALLOWED_ENDPOINTS="${LLM_ALLOWED_ENDPOINTS:-chat/completions|models}"
+LLM_AUTH_HEADER="${LLM_AUTH_HEADER:-Authorization}"
+LLM_API_KEY="${LLM_API_KEY:-}"
+LLM_PROXY_EXTRA_CA_FILE="${LLM_PROXY_EXTRA_CA_FILE:-}"
+LLM_PROXY_RESOLVER="${LLM_PROXY_RESOLVER:-127.0.0.11}"
+
+# ── Where the key goes ──────────────────────────────────────────────────────
+[ -n "${LLM_UPSTREAM_HOST:-}" ] \
+    || _creuset_die "LLM_UPSTREAM_HOST is not set. It names the only host the key is sent to, so it has no default here."
+_creuset_matches "$LLM_UPSTREAM_HOST" '[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?([.][A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?)*' \
+    || _creuset_die "LLM_UPSTREAM_HOST must be a bare host name (no scheme, port or path), not '$LLM_UPSTREAM_HOST'."
+
+case "$LLM_UPSTREAM_SCHEME" in
+    https) ;;
+    http)
+        # No dot = a compose service, resolved by Docker's DNS to a container in
+        # this project. nginx's resolver applies no search domains, so a
+        # single label cannot reach a LAN or internet host.
+        _creuset_matches "$LLM_UPSTREAM_HOST" '[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?' \
+            || _creuset_die "LLM_UPSTREAM_SCHEME=http is allowed only to a bare compose service name (no dots), not '$LLM_UPSTREAM_HOST': anywhere else the key and every prompt would cross the network in clear text. Use https."
+        # ...but not to Creuset itself: that would hand the key to the agent
+        # under test or its mock world, or loop through this proxy.
+        case "$LLM_UPSTREAM_HOST" in
+            localhost | llm-proxy | *-llm-proxy | mock-services | *-mock-services \
+            | agent-blue | *-agent-blue | agent-green | *-agent-green | router | creuset-router)
+                _creuset_die "LLM_UPSTREAM_HOST=$LLM_UPSTREAM_HOST is part of Creuset itself, not an LLM gateway." ;;
+        esac
+        ;;
+    *) _creuset_die "LLM_UPSTREAM_SCHEME must be https or http, not '$LLM_UPSTREAM_SCHEME'." ;;
+esac
+
+CREUSET_PROXY_PORT_SUFFIX=
+if [ -n "$LLM_UPSTREAM_PORT" ]; then
+    if ! _creuset_matches "$LLM_UPSTREAM_PORT" '[1-9][0-9]{0,4}' || [ "$LLM_UPSTREAM_PORT" -gt 65535 ]; then
+        _creuset_die "LLM_UPSTREAM_PORT must be a port number (1-65535), not '$LLM_UPSTREAM_PORT'."
+    fi
+    case "$LLM_UPSTREAM_SCHEME:$LLM_UPSTREAM_PORT" in
+        https:443 | http:80) ;;   # the scheme's own port renders as if unset
+        *) CREUSET_PROXY_PORT_SUFFIX=":$LLM_UPSTREAM_PORT" ;;
+    esac
+fi
+
+# ── What reaches it ─────────────────────────────────────────────────────────
+# The prefix is spliced into proxy_pass in front of $uri. A dot segment would
+# let the upstream resolve it out from under the allowlisted path.
+_creuset_matches "$LLM_UPSTREAM_PATH_PREFIX" '(/[A-Za-z0-9._~-]+)*' \
+    || _creuset_die "LLM_UPSTREAM_PATH_PREFIX must look like /seg or /seg/seg (no trailing slash, query or '%'), not '$LLM_UPSTREAM_PATH_PREFIX'."
+case "/$LLM_UPSTREAM_PATH_PREFIX/" in
+    */./* | */../*) _creuset_die "LLM_UPSTREAM_PATH_PREFIX must not contain '.' or '..' segments." ;;
+esac
+
+# Spliced into the location regex, so: literal path words joined by '|', no
+# dots (any character), no empty alternative (which would allowlist /v1/).
+_creuset_matches "$LLM_ALLOWED_ENDPOINTS" '[a-z0-9_/]+([|][a-z0-9_/]+)*' \
+    || _creuset_die "LLM_ALLOWED_ENDPOINTS must be endpoint paths joined by '|', e.g. chat/completions|models, not '$LLM_ALLOWED_ENDPOINTS'."
+_creuset_ifs=$IFS
+IFS='|'
+for _creuset_endpoint in $LLM_ALLOWED_ENDPOINTS; do
+    case "$_creuset_endpoint" in
+        chat/completions | completions | embeddings | models | responses) ;;
+        *) IFS=$_creuset_ifs
+           _creuset_die "LLM_ALLOWED_ENDPOINTS may contain only chat/completions, completions, embeddings, models and responses, not '$_creuset_endpoint': other APIs (files, batches, fine_tuning...) act on the account behind the key." ;;
+    esac
+done
+IFS=$_creuset_ifs
+
+# ── How it is authenticated ─────────────────────────────────────────────────
+_creuset_matches "$LLM_AUTH_HEADER" '[A-Za-z0-9-]+' \
+    || _creuset_die "LLM_AUTH_HEADER must be a header name (letters, digits, '-'), not '$LLM_AUTH_HEADER'."
+_creuset_header_lc=$(printf '%s' "$LLM_AUTH_HEADER" | tr '[:upper:]' '[:lower:]')
+case "$_creuset_header_lc" in
+    host | connection | content-length | content-type | transfer-encoding | te | trailer | upgrade | keep-alive)
+        _creuset_die "LLM_AUTH_HEADER=$LLM_AUTH_HEADER would overwrite a header the request itself needs." ;;
+esac
+
+if [ "$_creuset_header_lc" = authorization ]; then
+    LLM_AUTH_PREFIX="${LLM_AUTH_PREFIX:-Bearer}"
+    CREUSET_PROXY_AUTH_CLEAR=
+else
+    LLM_AUTH_PREFIX="${LLM_AUTH_PREFIX:-}"
+    # The agent sends its placeholder as a Bearer token. Left in place, a
+    # provider that also reads Authorization would reject it, or bill whoever
+    # a hijacked agent put there. (Literal nginx text, quotes included.)
+    # shellcheck disable=SC2089
+    CREUSET_PROXY_AUTH_CLEAR=' proxy_set_header Authorization "";'
+fi
+# A .env value cannot reliably keep a trailing space, so it is added here.
+while :; do
+    case "$LLM_AUTH_PREFIX" in *" ") LLM_AUTH_PREFIX="${LLM_AUTH_PREFIX% }" ;; *) break ;; esac
+done
+_creuset_matches "$LLM_AUTH_PREFIX" '[A-Za-z0-9._~+/=-]*' \
+    || _creuset_die "LLM_AUTH_PREFIX must be a single word such as Bearer, not '$LLM_AUTH_PREFIX'."
+[ -z "$LLM_AUTH_PREFIX" ] || LLM_AUTH_PREFIX="$LLM_AUTH_PREFIX "
+
+if [ -z "$LLM_API_KEY" ] && [ "$LLM_UPSTREAM_SCHEME" != http ]; then
+    _creuset_die "LLM_API_KEY is empty. Only a plain-http gateway inside the compose project may run without one."
+fi
+# No key: an empty header value makes nginx drop the header, so the gateway
+# sees neither a bare "Bearer " nor the agent's placeholder.
+[ -n "$LLM_API_KEY" ] || LLM_AUTH_PREFIX=
+# The key sits inside a double-quoted nginx string: a quote or whitespace
+# would end the header, and '$' would be expanded as a variable ($1 is the
+# location's regex capture). Its value is never printed.
+case "$LLM_API_KEY" in
+    *[[:space:][:cntrl:]\"\\\$]*)
+        _creuset_die "LLM_API_KEY contains whitespace, a control character, '\"', '\\' or '\$', which nginx would cut or expand." ;;
+esac
+
+# ── Whom it trusts ──────────────────────────────────────────────────────────
+CREUSET_PROXY_TRUSTED_CA=/etc/ssl/certs/ca-certificates.crt
+if [ -n "$LLM_PROXY_EXTRA_CA_FILE" ]; then
+    [ -f "$LLM_PROXY_EXTRA_CA_FILE" ] && [ -r "$LLM_PROXY_EXTRA_CA_FILE" ] \
+        || _creuset_die "LLM_PROXY_EXTRA_CA_FILE=$LLM_PROXY_EXTRA_CA_FILE is not a readable file in the container. Mount it there (read-only) in a compose override."
+    grep -q -e '-----BEGIN CERTIFICATE-----' "$LLM_PROXY_EXTRA_CA_FILE" \
+        || _creuset_die "LLM_PROXY_EXTRA_CA_FILE=$LLM_PROXY_EXTRA_CA_FILE contains no PEM certificate."
+    ! grep -q -e 'PRIVATE KEY' "$LLM_PROXY_EXTRA_CA_FILE" \
+        || _creuset_die "LLM_PROXY_EXTRA_CA_FILE=$LLM_PROXY_EXTRA_CA_FILE contains a private key. Mount only the CA certificate."
+    # /run is a tmpfs in docker-compose.yml, the root filesystem is read-only.
+    if ! mkdir -p /run/creuset \
+        || ! { cat "$CREUSET_PROXY_TRUSTED_CA" && echo && cat "$LLM_PROXY_EXTRA_CA_FILE"; } > /run/creuset/ca-bundle.crt
+    then
+        _creuset_die "could not write /run/creuset/ca-bundle.crt."
+    fi
+    CREUSET_PROXY_TRUSTED_CA=/run/creuset/ca-bundle.crt
+fi
+
+# ── Where names are looked up ───────────────────────────────────────────────
+if [ "$LLM_PROXY_RESOLVER" = local ]; then
+    LLM_PROXY_RESOLVER=$(awk 'BEGIN{ORS=" "} $1=="nameserver" {if ($2 ~ ":") {print "["$2"]"} else {print $2}}' /etc/resolv.conf)
+    LLM_PROXY_RESOLVER="${LLM_PROXY_RESOLVER% }"
+    [ -n "$LLM_PROXY_RESOLVER" ] || _creuset_die "LLM_PROXY_RESOLVER=local, but /etc/resolv.conf lists no nameserver."
+fi
+_creuset_matches "$LLM_PROXY_RESOLVER" '[][A-Za-z0-9.:_ -]+' \
+    || _creuset_die "LLM_PROXY_RESOLVER must be resolver addresses separated by spaces, or 'local', not '$LLM_PROXY_RESOLVER'."
+
+# shellcheck disable=SC2090  # exported for envsubst, never expanded by a shell
+export LLM_UPSTREAM_HOST LLM_UPSTREAM_SCHEME LLM_UPSTREAM_PORT LLM_UPSTREAM_PATH_PREFIX \
+    LLM_ALLOWED_ENDPOINTS LLM_AUTH_HEADER LLM_AUTH_PREFIX LLM_API_KEY \
+    LLM_PROXY_EXTRA_CA_FILE LLM_PROXY_RESOLVER \
+    CREUSET_PROXY_PORT_SUFFIX CREUSET_PROXY_TRUSTED_CA CREUSET_PROXY_AUTH_CLEAR
+
+if [ -z "${NGINX_ENTRYPOINT_QUIET_LOGS:-}" ]; then
+    echo "05-creuset-validate.envsh: upstream ${LLM_UPSTREAM_SCHEME}://${LLM_UPSTREAM_HOST}${CREUSET_PROXY_PORT_SUFFIX}${LLM_UPSTREAM_PATH_PREFIX}, endpoints ${LLM_ALLOWED_ENDPOINTS}, key in ${LLM_AUTH_HEADER}, CA ${CREUSET_PROXY_TRUSTED_CA}, resolver ${LLM_PROXY_RESOLVER}"
+fi
+
+unset _creuset_nl _creuset_ifs _creuset_endpoint _creuset_header_lc
+unset -f _creuset_die _creuset_matches

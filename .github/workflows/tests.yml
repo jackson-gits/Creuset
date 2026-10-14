@@ -1,0 +1,94 @@
+name: Tests
+
+# Fast, secret-free checks on every push and PR. Unlike gate.yml this needs no
+# LLM key and spends no provider quota: it tests the gate's own logic (fail-closed
+# paths, input validation, the judge fence, the router, the results browser) and
+# that the infrastructure config still parses.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r agent/requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest
+
+      - name: Attack library schema
+        run: python attacks/loader.py --dry-run
+
+      # Compose rejects some combinations (e.g. pids_limit beside
+      # deploy.resources.limits) only at `up` time; catch them here instead.
+      - name: Compose file is valid
+        env:
+          LLM_API_KEY: ci-placeholder
+          AGENT_MODEL: ci-placeholder
+        run: docker compose config --quiet
+
+      # Each provider profile goes through the entrypoint script compose mounts
+      # and must give a config nginx accepts. The default must also render
+      # byte-for-byte the config the published results ran behind (the image's
+      # real envsubst, not the Python emulation in the unit tests), and a
+      # profile the script refuses must stop the container before nginx starts.
+      - name: llm-proxy nginx config is valid
+        run: |
+          set -eu
+          render() {  # nginx -t one profile; arguments are `-e NAME=value` pairs
+            RENDERED="$(mktemp -d)"
+            docker run --rm -e LLM_PROXY_RESOLVER=127.0.0.11 "$@" \
+              -v "$PWD/deploy/llm-proxy:/etc/nginx/templates:ro" \
+              -v "$PWD/deploy/llm-proxy/05-creuset-validate.envsh:/docker-entrypoint.d/05-creuset-validate.envsh:ro" \
+              -v "$RENDERED:/etc/nginx/conf.d" \
+              nginx:1.31-alpine nginx -t
+          }
+
+          echo "::group::default (Groq), byte-identical to the published config"
+          render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=api.groq.com
+          cmp "$RENDERED/default.conf" tests/snapshots/llm_proxy_default.conf
+          echo "::endgroup::"
+
+          echo "::group::OpenAI (/v1, Responses and embeddings enabled)"
+          render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=api.openai.com \
+            -e "LLM_ALLOWED_ENDPOINTS=chat/completions|models|responses|embeddings"
+          echo "::endgroup::"
+
+          echo "::group::prefixed provider (path prefix, port, x-api-key, extra CA)"
+          render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=openrouter.ai \
+            -e LLM_UPSTREAM_PATH_PREFIX=/api -e LLM_UPSTREAM_PORT=8443 -e LLM_AUTH_HEADER=x-api-key \
+            -e LLM_PROXY_EXTRA_CA_FILE=/etc/ssl/certs/ca-certificates.crt
+          echo "::endgroup::"
+
+          echo "::group::compose-internal gateway over http, no key"
+          render -e LLM_API_KEY= -e LLM_UPSTREAM_SCHEME=http -e LLM_UPSTREAM_HOST=ollama \
+            -e LLM_UPSTREAM_PORT=11434
+          echo "::endgroup::"
+
+          echo "::group::refused: plain http to a public host"
+          if out="$(render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_SCHEME=http \
+                      -e LLM_UPSTREAM_HOST=api.groq.com 2>&1)"; then
+            echo "$out"
+            echo "::error::llm-proxy accepted plain http to a public host"
+            exit 1
+          fi
+          echo "$out" | grep -F "refusing to start llm-proxy"
+          echo "::endgroup::"

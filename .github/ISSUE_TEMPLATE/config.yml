@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/jackson-gits/creuset/security/advisories/new
+    about: Privately, through GitHub's private vulnerability reporting. Never as a public issue.
+  - name: Security policy
+    url: https://github.com/jackson-gits/creuset/security/policy
+    about: What is in scope, response times, and responsible use of the attack library.

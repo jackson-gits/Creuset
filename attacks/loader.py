@@ -58,7 +58,7 @@ for _stream in (sys.stdout, sys.stderr):
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 sys.path.insert(0, str(_ROOT / "sandbox"))
-from run_test import preflight, run_case  # noqa: E402
+from run_test import preflight, run_case, validate_variant  # noqa: E402
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -362,6 +362,9 @@ def resume_suite(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     variant = manifest.get("variant")
+    problem = validate_variant(variant)
+    if problem:
+        raise ValueError(f"Manifest names an unusable variant: {problem}")
     library = Path(manifest["library"])
     if not library.exists():
         raise FileNotFoundError(f"Library {library} named by the manifest no longer exists.")
@@ -512,10 +515,15 @@ def main(
             console.print(f"  ✗ {e}")
         raise typer.Exit(code=1)
     probes = [c["id"] for c in all_cases if c.get("probe")]
-    console.print(f"[green]✓ All cases valid.[/green]"
+    console.print("[green]✓ All cases valid.[/green]"
                   + (f" [dim](judge probes, not run against the agent: {probes})[/dim]" if probes else ""))
     if dry_run:
         raise typer.Exit(code=0)
+
+    problem = validate_variant(variant)
+    if problem:
+        console.print(f"[red]✗ {problem}[/red]")
+        raise typer.Exit(code=2)
 
     ids = [c.strip() for c in cases.split(",")] if cases else None
     selected = select_cases(all_cases, category, ids)

@@ -27,13 +27,18 @@ from typing import Any, Dict
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from run_agent import run_scenario
+from run_agent import _load_variant, run_scenario
 
 _VARIANT = os.getenv("AGENT_VARIANT", "hardened")
 _VERSION = os.getenv("AGENT_VERSION", "unknown")
 _SLOT = os.getenv("SLOT", "unknown")
 _LIVE_DIR = Path(os.getenv("LIVE_TRAFFIC_DIR", "/app/live_traffic"))
 _MAX_ACTIONS = int(os.getenv("LIVE_MAX_ACTIONS", "8"))
+
+# Refuse to start on a variant that cannot load. Otherwise the slot comes up
+# healthy and then fails every request — and the gate's `--wait` on the
+# healthcheck would wave it through to receive live traffic.
+_load_variant(_VARIANT)
 
 app = FastAPI(title=f"Creuset agent ({_SLOT})", version="2.0.0")
 

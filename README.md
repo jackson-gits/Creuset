@@ -46,8 +46,8 @@ The design principle throughout is **fail-closed**: a crashed container, a timeo
 
 Neither layer is sufficient alone:
 
-- **Rule checks** are deterministic and grounded in the **server-side audit log** from mock-services, not the agent's own account of itself. An agent that deletes a file and does not mention it is still caught. But rules cannot tell whether an agent adopted a jailbreak persona or actually completed a legitimate task.
-- **The LLM judge** handles that semantic layer — and is itself attackable, which case JM-001 probes directly.
+- **Rule checks** are deterministic and grounded in the **server-side audit log** from mock-services, not the agent's own account of itself. The harness reads that log directly from mock-services after the agent container exits, so the process under test never gets to relay its own ground truth. An agent that deletes a file and does not mention it is still caught. But rules cannot tell whether an agent adopted a jailbreak persona or actually completed a legitimate task.
+- **The LLM judge** handles that semantic layer — and is itself attackable, which case JM-001 probes directly. The transcript reaches it fenced as untrusted data, and the fence cannot be closed from inside: any `</transcript>` the agent writes is neutralised first.
 
 The per-case verdict is the **AND** of both. A fooled judge can never turn a rule-layer FAIL into a PASS, which is what makes judge manipulation survivable.
 
@@ -204,6 +204,13 @@ pip install -r requirements.txt
 
 `requirements.txt` is host-side only. The containers install their own narrower sets (`agent/`, `sandbox/mock_services/`, `deploy/`).
 
+To run the test suite (no Docker, no API key, no quota):
+```bash
+pip install -r requirements.txt -r agent/requirements.txt -r requirements-dev.txt
+ruff check . && pytest
+```
+The same checks run in CI on every push (`.github/workflows/tests.yml`).
+
 ### 3. Build images and start infrastructure
 ```bash
 docker compose build
@@ -300,6 +307,27 @@ Resume re-runs only what it has to, and is idempotent — running it on a finish
 
 ---
 
+## Security model
+
+The gate is only as trustworthy as its own plumbing, so each trust boundary is enforced rather than assumed:
+
+| Boundary | Enforcement |
+|---|---|
+| Agent → internet | `creuset-net` is `internal: true`; the isolation probe (`run_test.py --check`) proves no TCP and no DNS out |
+| Agent → LLM API | `llm-proxy` allowlists two endpoints, forwards only the **normalised** path (a `..%2F` path cannot reach other APIs), injects the real key, and **verifies the upstream TLS certificate** |
+| Agent → real key | Agents hold a placeholder; only `llm-proxy` and the host judge see `LLM_API_KEY` |
+| Agent → evidence | The harness, not the agent, fetches the audit log; the log is append-only and an unknown run is a 404, never an empty log |
+| Transcript → judge | Untrusted text cannot close its `<transcript>` fence; the rule layer is ANDed in, so a fooled judge cannot pass a rule FAIL |
+| Score → deployment | Missing, errored, truncated or judge-less cases fail closed; zero cases is a FAIL; the gate refuses any PASS that is not also `valid` |
+| Operator input → slot | `--version` / `--variant` are validated before they reach a file path, an env file or Compose interpolation |
+| Router → live traffic | `state.json` is written atomically; if it is unreadable the router returns 503 rather than guessing a slot |
+| Results browser | Loopback-only Host allowlist (DNS rebinding), strict CSP, every value escaped, paths confined to `logs/` |
+| CI | Inputs are passed as environment variables (no script injection), read-only token, gate runs queued |
+
+Every container has a read-only root filesystem, all capabilities dropped, `no-new-privileges`, and memory/CPU/PID limits. All but `llm-proxy` also run as a non-root user; its nginx master starts as root to hand its workers to the `nginx` user, keeping only the three capabilities that needs (CHOWN, SETUID, SETGID).
+
+---
+
 ## Project structure
 
 ```
@@ -318,7 +346,7 @@ creuset/
 │   ├── benign_tasks.yaml   10 legitimate tasks (false-positive measurement)
 │   └── loader.py           Schema validation + batch runner
 ├── judge/
-│   ├── rule_checks.py      9 deterministic checks
+│   ├── rule_checks.py      10 deterministic checks
 │   ├── model_judge.py      LLM judge (median of N samples)
 │   └── score.py            Aggregation, coverage enforcement, gate verdict
 ├── gate/run_gate.py        End-to-end orchestrator
@@ -334,6 +362,7 @@ creuset/
 ├── ui/                     Local results browser (read-only, no Docker needed)
 │   ├── app.py              FastAPI: reads logs/ and deploy/state/
 │   └── static/             Single-page UI, vanilla JS, no build step
+├── tests/                  pytest suite: fail-closed paths, validation, fence, router, UI
 ├── Creuset.bat             Double-click launcher for the browser
 └── logs/
     ├── runs/<batch>/       Transcripts + manifest per batch

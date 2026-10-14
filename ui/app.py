@@ -26,15 +26,14 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
-import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 _ROOT = Path(__file__).resolve().parent.parent
 _LOGS = _ROOT / "logs"
@@ -42,7 +41,42 @@ _RUNS = _LOGS / "runs"
 _STATIC = Path(__file__).resolve().parent / "static"
 _STATE_FILE = _ROOT / "deploy" / "state" / "state.json"
 
-app = FastAPI(title="Creuset Results Browser", version="1.0.0")
+app = FastAPI(title="Creuset Results Browser", version="1.0.0",
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+# ── Browser-facing hardening ──────────────────────────────────────────────────
+#
+# Binding to 127.0.0.1 keeps other machines out, but not other WEBSITES: a page
+# the user visits can rebind its own hostname to 127.0.0.1 and then read this
+# API same-origin (DNS rebinding) — every transcript under logs/. Such requests
+# carry the attacker's hostname in Host, so only loopback names are accepted.
+_ALLOWED_HOSTS = [h.strip() for h in
+                  os.getenv("CREUSET_UI_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if h.strip()]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
+
+# Everything this app renders is attacker-influenced by design: transcripts
+# echo injected payloads, and judge rationales quote them. The front end
+# escapes all of it; the CSP is the backstop if that ever slips — no inline
+# script, no third-party origins, no framing.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
 
 
 # ── Safe path handling ────────────────────────────────────────────────────────
@@ -72,6 +106,12 @@ def _read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         raise HTTPException(status_code=422, detail=f"Unreadable JSON: {type(e).__name__}")
+
+
+def _basename(path: Any) -> str:
+    """File name of a path recorded on ANY OS. Reports written on Windows store
+    `D:\\...\\attack_library.yaml`, which Path() does not split elsewhere."""
+    return PureWindowsPath(str(path or "")).name
 
 
 def _rel(path: Path) -> str:
@@ -113,6 +153,8 @@ def _invalid_reasons(report: Dict[str, Any]) -> List[str]:
                        f"{', '.join(report['truncated_finalizer'])} — those answers stop mid-sentence")
     if report.get("batch_complete") is False:
         reasons.append("The batch was stopped early by the quota circuit breaker")
+    if not report.get("results"):
+        reasons.append("No cases were scored at all")
     return reasons
 
 
@@ -121,7 +163,7 @@ def _report_card(path: Path, report: Dict[str, Any], source: str,
     models = report.get("models") or {}
     judge_model = models.get("judge")
     results = report.get("results") or []
-    library = Path(str(report.get("library") or "")).name
+    library = _basename(report.get("library"))
     return {
         "path": _rel(path),
         "source": source,
@@ -191,7 +233,7 @@ def _discover_batches() -> List[Dict[str, Any]]:
             "batch": manifest_path.parent.name,
             "ts": m.get("ts") or int(manifest_path.stat().st_mtime),
             "variant": m.get("variant"),
-            "library": Path(str(m.get("library") or "")).name or None,
+            "library": _basename(m.get("library")) or None,
             "case_count": m.get("case_count"),
             "present": len(cases),
             "completed": sum(1 for c in cases if c.get("status") == "completed"),
@@ -220,7 +262,6 @@ def overview() -> Dict[str, Any]:
         "reports": _discover_reports(),
         "batches": _discover_batches(),
         "deploy": _deploy_state(),
-        "root": str(_ROOT),
     }
 
 
@@ -299,7 +340,9 @@ def infra() -> Dict[str, Any]:
     because it shells out to `docker`, which is slow to fail when Docker Desktop
     is not running — and this whole app is meant to work fine without it.
     """
-    sys.path.insert(0, str(_ROOT / "sandbox"))
+    sandbox = str(_ROOT / "sandbox")
+    if sandbox not in sys.path:
+        sys.path.insert(0, sandbox)
     try:
         from run_test import preflight  # noqa: WPS433 — imported lazily on purpose
         problems = preflight()

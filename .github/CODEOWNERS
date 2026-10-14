@@ -1,0 +1,33 @@
+# Code owners are requested for review automatically, and with branch
+# protection's "Require review from Code Owners" a change here cannot merge
+# without that review. The LAST matching pattern wins, so keep "*" first.
+
+# Default: everything.
+*                       @jackson-gits
+
+# Trust boundaries. A regression here is a vulnerability, not a bug
+# (see SECURITY.md): the only egress and the real API key, the sandbox and its
+# ground-truth audit log, scoring and the deploy decision, and CI with secrets.
+/deploy/llm-proxy/      @jackson-gits
+/sandbox/               @jackson-gits
+/judge/                 @jackson-gits
+/gate/                  @jackson-gits
+/.github/workflows/     @jackson-gits
+
+# Measurement-affecting surfaces. A change here can silently invalidate every
+# published result; tests/test_baseline_lock.py fails on it, and this makes
+# sure a human decides (see "Measurement-affecting changes" in CONTRIBUTING.md).
+/agent/variants/        @jackson-gits
+/agent/run_agent.py     @jackson-gits
+/agent/tools.py         @jackson-gits
+/agent/callbacks.py     @jackson-gits
+/attacks/*.yaml         @jackson-gits
+/baseline.lock.json     @jackson-gits
+/scripts/update_baseline_lock.py  @jackson-gits
+/tests/test_baseline_lock.py      @jackson-gits
+/tests/test_judge_prompt_snapshot.py  @jackson-gits
+/tests/snapshots/       @jackson-gits
+
+# Who may change the rules above, and the security policy.
+/.github/CODEOWNERS     @jackson-gits
+/SECURITY.md            @jackson-gits

@@ -1,0 +1,126 @@
+name: Bug report
+description: Something in Creuset itself is broken (a crash, a wrong report, a command that does not work as documented).
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Before you start:
+
+        - **A security vulnerability in Creuset** (sandbox escape, key exposure, a case that should FAIL scoring PASS, UI traversal, ...) must **not** go here. Report it privately as described in [SECURITY.md](https://github.com/jackson-gits/creuset/security/policy).
+        - **An attack that gets past an agent** is a test case, not a bug: use the *Attack case* template.
+        - **A FAIL on safe agent behaviour** has its own *False positive* template.
+
+        Never paste an API key, `.env` contents or a provider organisation ID (`org_...`). Provider 429 bodies contain one.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command(s) you ran, from the repository root.
+      placeholder: python gate/run_gate.py --version v1 --variant hardened --skip-model-judge --dry-run
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The relevant console output or traceback. Redact keys and `org_...` IDs.
+      render: text
+
+  - type: dropdown
+    id: report-valid
+    attributes:
+      label: Score report `valid` flag
+      description: If the problem involves a score report (`judge/score.py --output`, or a gate record), what does its `valid` field say?
+      options:
+        - No score report involved
+        - "true"
+        - "false"
+        - The report has no valid field
+    validations:
+      required: true
+
+  - type: textarea
+    id: invalid-reasons
+    attributes:
+      label: Why the report is invalid
+      description: |
+        If `valid` is false, paste the reasons. The results browser lists them on the report; in the JSON they are `unmeasured`, `judge_errors`, `truncated_finalizer`, `batch_complete` and `coverage.missing`. An invalid report's FAILs are usually harness or quota failures, not findings about the agent.
+      render: json
+
+  - type: input
+    id: commit
+    attributes:
+      label: Creuset version or commit
+      description: A release tag, or the output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+        - Linux
+        - Other (say which below)
+    validations:
+      required: true
+
+  - type: input
+    id: docker-version
+    attributes:
+      label: Docker version
+      description: Output of `docker version --format "{{.Server.Version}}"`, plus Docker Desktop / Engine / Podman / Colima. Write "not installed" if the problem does not involve Docker.
+    validations:
+      required: true
+
+  - type: input
+    id: compose-version
+    attributes:
+      label: Docker Compose version
+      description: Output of `docker compose version --short`.
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+
+  - type: input
+    id: models
+    attributes:
+      label: Provider and models
+      description: The LLM provider plus `AGENT_MODEL` and `JUDGE_MODEL`, if a live run is involved. Never the key.
+      placeholder: Groq, openai/gpt-oss-20b (agent), openai/gpt-oss-120b (judge)
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Other environment details, workarounds you tried, or links.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true
+        - label: I removed API keys, `.env` contents and provider organisation IDs from everything above.
+          required: true
+        - label: I searched existing issues for this problem.

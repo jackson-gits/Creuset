@@ -1,0 +1,65 @@
+# Pre-commit hooks: the fast, secret-free checks CI runs, caught at commit time
+# instead of after a push. None of them needs Docker, a provider key or quota.
+#
+#   pip install pre-commit
+#   pre-commit install               # once per clone
+#   pre-commit run --all-files       # the whole tree, e.g. after a pull
+#
+# The local hooks run `python` from YOUR environment (language: system), so
+# activate the project venv first; see CONTRIBUTING.md for the install line.
+#
+# Revs are released tags. Bump them deliberately (`pre-commit autoupdate`),
+# not as a side effect of an unrelated change.
+
+# Machine-written files that a fixer must never rewrite:
+#   logs/            run evidence; changing a byte changes what was published
+#   tests/snapshots/ regenerated only deliberately (CREUSET_UPDATE_SNAPSHOTS=1)
+# The secret scanners still look at them: a leaked key in a log is still leaked.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
+    hooks:
+      # Uses the [tool.ruff] config in pyproject.toml, so it lints exactly what
+      # `ruff check .` lints (logs/ excluded there via --force-exclude).
+      - id: ruff-check
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+        exclude: ^(logs/|tests/snapshots/)
+      # Default --fix=auto: only a file that MIXES endings is touched, so a
+      # Windows checkout (CRLF throughout, per .gitattributes) is left alone.
+      # *.bat is excluded because cmd.exe needs CRLF and .gitattributes pins it.
+      - id: mixed-line-ending
+        exclude: (^(logs/|tests/snapshots/)|\.bat$)
+      - id: detect-private-key
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      # Scans the staged diff. GitHub push protection only knows provider
+      # patterns it recognises; this catches the rest before they leave the
+      # machine (.env must never be committed).
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # The loader refuses a library with even one invalid case, so a malformed
+      # case blocks every run and CI's schema step. Catch it at commit time.
+      # Also runs when attacks/loader.py changes, since it owns the schema.
+      - id: attack-library-schema
+        name: attack library schema (loader --dry-run)
+        entry: python attacks/loader.py --dry-run --library attacks/attack_library.yaml
+        language: system
+        files: ^attacks/(.*\.ya?ml|loader\.py)$
+        pass_filenames: false
+      - id: benign-library-schema
+        name: benign task library schema (loader --dry-run)
+        entry: python attacks/loader.py --dry-run --library attacks/benign_tasks.yaml
+        language: system
+        files: ^attacks/(.*\.ya?ml|loader\.py)$
+        pass_filenames: false

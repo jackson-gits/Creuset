@@ -7,7 +7,7 @@ captures the transcript, and guarantees the container is gone afterwards.
 Each test container:
   docker run --rm --name creuset-test-<run_id>
     --network creuset-net            # internal: true — no internet
-    --read-only --tmpfs /tmp         # immutable filesystem
+    --read-only --tmpfs /tmp:...     # immutable filesystem; scratch is noexec
     --cap-drop ALL --security-opt no-new-privileges --pids-limit 256
     --memory 512m --cpus 1.0
     -e ... (explicit allowlist; the real LLM key is NOT passed — llm-proxy injects it)
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import typer
 import yaml
@@ -64,6 +66,24 @@ NETWORK = "creuset-net"
 AGENT_IMAGE = os.getenv("AGENT_IMAGE_TAG", "creuset-agent:latest")
 TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "180"))
 INFRA_CONTAINERS = ("llm-proxy", "mock-services")
+MOCK_CONTAINER = "mock-services"
+_VARIANTS_DIR = _ROOT / "agent" / "variants"
+_VARIANT_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_variant(variant: str) -> Optional[str]:
+    """
+    Why `variant` cannot be run, or None if it can.
+
+    The name ends up in a container argument, a mock-services run id and the
+    batch directory under logs/runs/ — so `../x` must never get that far.
+    """
+    if not _VARIANT_NAME.fullmatch(variant or ""):
+        return f"invalid variant {variant!r}: letters, digits, '-' and '_' only"
+    if not (_VARIANTS_DIR / f"{variant}.txt").is_file():
+        known = sorted(p.stem for p in _VARIANTS_DIR.glob("*.txt"))
+        return f"unknown variant {variant!r}; known: {', '.join(known)}"
+    return None
 
 # The ONLY environment a test container receives.
 def _container_env(run_id: str) -> Dict[str, str]:
@@ -85,7 +105,7 @@ def _container_env(run_id: str) -> Dict[str, str]:
 
 _SANDBOX_FLAGS = [
     "--network", NETWORK,
-    "--read-only", "--tmpfs", "/tmp",
+    "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
     "--pids-limit", "256",
@@ -217,6 +237,36 @@ def isolation_probe() -> Dict[str, Any]:
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 
+_AUDIT_FETCH = ("import sys, urllib.request; "
+                "sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=10).read().decode())")
+
+
+def fetch_audit(run_id: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    The run's server-side audit log, read by the HARNESS directly from
+    mock-services once the agent container has exited.
+
+    The agent also fetches this log and reports it on stdout, but that copy is
+    relayed by the very process under test. Ground truth the subject can edit is
+    not ground truth, so the harness's copy replaces it. None = unavailable,
+    which the rule layer fails closed.
+    """
+    url = f"http://localhost:8001/audit/log?run={quote(run_id, safe='')}"
+    try:
+        # The image's own Python, not curl: it is the one tool the image cannot
+        # lose. urlopen raises on a 404 (unknown run), so that exits non-zero.
+        proc = _docker(["exec", MOCK_CONTAINER, "python", "-c", _AUDIT_FETCH, url], timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        entries = json.loads(proc.stdout).get("entries")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return entries if isinstance(entries, list) else None
+
+
 def run_case(case: Dict[str, Any], variant: str) -> Dict[str, Any]:
     """Run one test case in a fresh sandbox container. Always returns a transcript dict."""
     case_id = case.get("id") or case.get("test_id") or "CUSTOM"
@@ -258,11 +308,14 @@ def run_case(case: Dict[str, Any], variant: str) -> Dict[str, Any]:
         return _failure(case_id, variant, run_id, status,
                         f"exit={proc.returncode} stderr={stderr[-800:]} stdout={stdout[:300]}", elapsed)
 
-    # The harness, not the agent, is authoritative for identity fields.
+    # The harness, not the agent, is authoritative for identity fields — and for
+    # what the run actually did.
     transcript["test_id"] = case_id
     transcript["run_id"] = run_id
     transcript["variant"] = variant
     transcript["elapsed_seconds"] = round(elapsed, 2)
+    transcript["service_audit"] = fetch_audit(run_id)
+    transcript["audit_source"] = "harness"
     if stderr:
         transcript["stderr"] = stderr[-2000:]
     return transcript
@@ -286,6 +339,10 @@ def main(
     check: bool = typer.Option(False, "--check", help="Only run preflight + isolation probe"),
 ) -> None:
     """Run a single test case through the sandbox and print the transcript JSON on stdout."""
+    problem = validate_variant(variant)
+    if problem:
+        console.print(f"[red]✗[/red] {problem}")
+        raise typer.Exit(code=2)
     problems = preflight()
     if problems:
         for p in problems:

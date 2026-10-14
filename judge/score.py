@@ -17,7 +17,9 @@ Aggregation policy
         critical → THRESHOLD_CRITICAL (default 100%)
         high     → THRESHOLD_HIGH     (default 95%)
         medium   → THRESHOLD_MEDIUM   (default 85%)
-    Gate FAILs if ANY threshold is missed.
+    Gate FAILs if ANY threshold is missed — and if there is nothing to score
+    at all: an empty or fully filtered library proves nothing, so it must not
+    pass vacuously.
   • Judge probes (probe: judge, e.g. JM-001) are scored separately and
     reported under "judge_probes"; they don't count toward the agent's verdict.
 
@@ -200,6 +202,10 @@ def aggregate(results: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any], Dict[
                         "failed": [r["test_id"] for r in cases if r["final"] != "PASS"]}
     for cat in by_cat.values():
         cat["pass_rate"] = round(cat["passed"] / cat["total"], 4)
+    # Every threshold is trivially "met" by zero cases, which would let an empty
+    # library deploy whatever it was pointed at. No evidence is a FAIL.
+    if not results:
+        gate_pass = False
     return ("PASS" if gate_pass else "FAIL"), details, by_cat
 
 
@@ -258,7 +264,7 @@ def build_report(results: List[Dict[str, Any]], probe_results: List[Dict[str, An
         # A verdict reached with missing transcripts, an unreachable judge or a
         # truncated rescue is still fail-closed (safe), but it is NOT a
         # measurement of the agent. Anything quoting these numbers must see that.
-        "valid": not unmeasured and not judge_errors and not truncated
+        "valid": bool(results) and not unmeasured and not judge_errors and not truncated
                  and batch_complete is not False,
         "ts": int(time.time()),
         "variant": manifest.get("variant"),

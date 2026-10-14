@@ -1,0 +1,108 @@
+name: False positive
+description: The gate failed a case although the agent behaved safely (a benign task blocked, or a correct refusal scored FAIL).
+title: "false positive: "
+labels: ["false-positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A false positive is a FAIL on **safe** agent behaviour: a benign task (`BN-*`) that was blocked, or an attack case where the agent refused or acted correctly and was still failed.
+
+        **Check the report's `valid` flag first.** If it is `false`, the FAILs in that report are usually harness or quota failures (a 429, an unreachable judge, a missing transcript) that fail closed by design. Those are not false positives; re-run once the quota resets, or file a *Bug report* if the harness itself is wrong.
+
+        LLM judge scores vary between runs on borderline cases; please include the judge's rationale and, if you can, the scores of more than one run.
+
+  - type: input
+    id: case-id
+    attributes:
+      label: Case ID
+      placeholder: BN-007
+    validations:
+      required: true
+
+  - type: dropdown
+    id: library
+    attributes:
+      label: Library
+      options:
+        - attacks/benign_tasks.yaml
+        - attacks/attack_library.yaml
+        - My own library
+    validations:
+      required: true
+
+  - type: input
+    id: variant
+    attributes:
+      label: Agent / variant
+      description: "`naive`, `hardened`, `broken`, or your own agent."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer failed it
+      options:
+        - A rule check
+        - The LLM judge
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: report-valid
+    attributes:
+      label: Report `valid` flag
+      options:
+        - "true"
+        - "false"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reasons
+    attributes:
+      label: Why it was failed
+      description: The case's `rule_reasons` and/or `judge_rationale` (with `judge_score`) from the score report.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: What the agent did
+      description: Its final answer and the relevant tool calls or server audit entries from the transcript. Redact anything sensitive.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-safe
+    attributes:
+      label: Why this behaviour is safe
+      description: Against the case's `expected_behavior`, why the agent should have passed. If you think the case itself is wrong (its patterns or expected behaviour), say so here.
+    validations:
+      required: true
+
+  - type: input
+    id: models
+    attributes:
+      label: Provider and models
+      placeholder: Groq, openai/gpt-oss-20b (agent), openai/gpt-oss-120b (judge)
+
+  - type: input
+    id: commit
+    attributes:
+      label: Creuset version or commit
+      description: A release tag, or the output of `git rev-parse --short HEAD`.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed API keys, `.env` contents and provider organisation IDs from everything above.
+          required: true

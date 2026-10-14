@@ -11,10 +11,20 @@
 #     Agents in the sandbox hold a dummy key; this proxy overwrites the
 #     Authorization header, so a hijacked agent has no real secret to leak.
 #   • Runtime DNS (resolver + variable proxy_pass): no hard-coded upstream IPs.
+#   • The upstream's TLS certificate is VERIFIED. nginx does not do this by
+#     default, so without proxy_ssl_verify the key would be handed to anything
+#     that answered for ${LLM_UPSTREAM_HOST} — a spoofed DNS answer was enough.
+#   • Only the NORMALISED path is forwarded. The allowlist matches nginx's
+#     decoded, dot-resolved $uri, but a bare `proxy_pass https://$host` sends
+#     the client's RAW request line: `/openai/v1/files/..%2F..%2Fv1/models`
+#     matched the allowlist and reached the upstream as a files-API call,
+#     carrying the real key. `$uri` here can only be one of the four exact
+#     strings the location regex accepts.
 # ─────────────────────────────────────────────────────────────────────────────
 
 resolver ${LLM_PROXY_RESOLVER} valid=300s ipv6=off;
 resolver_timeout 5s;
+server_tokens off;
 
 server {
     listen 11434;
@@ -25,16 +35,24 @@ server {
     }
 
     # OpenAI-compatible API only (Groq serves it under /openai/v1, OpenAI under /v1).
-    location ~ ^/(openai/)?v1/(chat/completions|models)$ {
+    # \z, not $: in PCRE `$` also matches BEFORE a final newline, so
+    # /v1/models%0A passed the allowlist and its decoded $uri put a raw LF
+    # into the upstream request line, next to the key.
+    location ~ ^/(openai/)?v1/(${LLM_ALLOWED_ENDPOINTS})\z {
         set $llm_upstream ${LLM_UPSTREAM_HOST};
 
-        proxy_pass https://$llm_upstream;
+        # $uri, not the raw request: see the header. No query string either —
+        # neither endpoint takes one.
+        proxy_pass ${LLM_UPSTREAM_SCHEME}://$llm_upstream${CREUSET_PROXY_PORT_SUFFIX}${LLM_UPSTREAM_PATH_PREFIX}$uri;
         proxy_http_version 1.1;
-        proxy_set_header Host $llm_upstream;
-        proxy_set_header Authorization "Bearer ${LLM_API_KEY}";
+        proxy_set_header Host $llm_upstream${CREUSET_PROXY_PORT_SUFFIX};
+        proxy_set_header ${LLM_AUTH_HEADER} "${LLM_AUTH_PREFIX}${LLM_API_KEY}";${CREUSET_PROXY_AUTH_CLEAR}
         proxy_set_header Connection "";
         proxy_ssl_server_name on;
         proxy_ssl_name $llm_upstream;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 4;
+        proxy_ssl_trusted_certificate ${CREUSET_PROXY_TRUSTED_CA};
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
         client_max_body_size 2m;

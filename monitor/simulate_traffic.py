@@ -23,7 +23,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -216,8 +215,8 @@ def main(
         console.print(f"[bold]Result:[/bold] {result_json}")
 
     console.print("\n[bold]Demo complete.[/bold]")
-    console.print(f"Check [cyan]logs/gate_runs/[/cyan] for incident reports.")
-    console.print(f"Check [cyan]deploy/state/state.json[/cyan] for current slot state.")
+    console.print("Check [cyan]logs/gate_runs/[/cyan] for incident reports.")
+    console.print("Check [cyan]deploy/state/state.json[/cyan] for current slot state.")
 
 
 if __name__ == "__main__":

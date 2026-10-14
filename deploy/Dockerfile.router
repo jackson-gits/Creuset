@@ -4,6 +4,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 COPY requirements.router.txt .
 RUN pip install --no-cache-dir -r requirements.router.txt
 COPY router.py .
+# Unprivileged: the router only reads state/ (mounted read-only) and proxies.
+RUN useradd --uid 10002 --no-create-home --shell /usr/sbin/nologin router
+USER router
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
     CMD curl -f http://localhost:8080/health || exit 1
 CMD ["python", "router.py"]
