@@ -64,8 +64,8 @@ sys.path.insert(0, str(_ROOT / "sandbox"))
 sys.path.insert(0, str(_ROOT / "judge"))
 import call_policy  # noqa: E402
 from run_test import (  # noqa: E402
-    Subject, env_fingerprint, image_id, limits_from_env, make_subject, parse_agent_env, preflight,
-    run_case,
+    Subject, env_fingerprint, image_content, image_id, limits_from_env, make_subject, parse_agent_env,
+    preflight, run_case,
 )
 
 app = typer.Typer(add_completion=False)
@@ -256,6 +256,8 @@ def _entry(case_id: str, transcript: Dict[str, Any], path: Path, sample: int = 1
     # left out rather than null so reconciling an old batch is not all noise.
     if transcript.get("agent_image_id"):
         entry["agent_image_id"] = transcript["agent_image_id"]
+    if transcript.get("agent_image_content"):
+        entry["agent_image_content"] = transcript["agent_image_content"]
     if sample > 1:
         entry["sample"] = sample
     return entry
@@ -377,7 +379,8 @@ def run_suite(
         "variant": variant,
         # What ran: the image ID binds every verdict in this batch to the bytes
         # that produced it, so a rebuild cannot be resumed into the same batch.
-        "subject": {**subject.describe(), "image_id": started_image_id},
+        "subject": {**subject.describe(), "image_id": started_image_id,
+                    "image_content": image_content(subject.image) if started_image_id else None},
         # The box it ran in: memory, CPUs and writable paths can change behaviour.
         "sandbox": limits_from_env().describe(),
         "library": str(library.resolve()),
@@ -456,6 +459,25 @@ def _reconcile_with_disk(batch_dir: Path, in_scope: List[Dict[str, Any]],
     return changed
 
 
+def recorded_images(manifest: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """
+    How a batch's image is identified, and every value recorded for it:
+    ("content", [...]) when every run recorded its content identity, else
+    ("id", [...]) for batches older than that field.
+    """
+    entries = manifest.get("cases", [])
+    subject = manifest.get("subject") or {}
+    if entries and all(e.get("agent_image_content") for e in entries):
+        contents = {e["agent_image_content"] for e in entries}
+        if subject.get("image_content"):
+            contents.add(subject["image_content"])
+        return "content", sorted(contents)
+    ids = {e["agent_image_id"] for e in entries if e.get("agent_image_id")}
+    if subject.get("image_id"):
+        ids.add(subject["image_id"])
+    return "id", sorted(ids)
+
+
 def _manifest_subject(manifest: Dict[str, Any],
                       agent_env: Tuple[Tuple[str, str], ...] = ()) -> Tuple[Subject, List[str]]:
     """
@@ -531,11 +553,16 @@ def resume_suite(
 
     # The same for the build. A rebuilt image (a pulled fix, an edited prompt)
     # under the same tag is a different agent; its cases do not belong here.
+    # Compared by content where the batch recorded it: rebuilding unchanged code
+    # gives a new image ID on Docker's containerd store, and that is no reason
+    # to refuse. Any change to the image's config or layers still is.
     current_image = image_id(subject.image)
-    if previous_images and previous_images != [current_image] and not allow_image_change:
+    kind, recorded = recorded_images(manifest)
+    current = image_content(subject.image) if kind == "content" else current_image
+    if recorded and recorded != [current] and not allow_image_change:
         raise ValueError(
-            f"This batch ran image {', '.join(previous_images)}, but {subject.image} is now "
-            f"{current_image or 'missing'}. Resuming would mix builds inside one batch. "
+            f"This batch ran image {', '.join(recorded)}, but {subject.image} is now "
+            f"{current or 'missing'}. Resuming would mix builds inside one batch. "
             f"Restore that image, start a new batch, or pass --allow-image-change if you "
             f"genuinely intend a mixed batch.")
 
@@ -597,7 +624,9 @@ def resume_suite(
     # the per-case agent_image_id, which _summarise reports. A batch older than
     # the field ran an image nobody recorded, so it stays unknown, not "current".
     started_with = previous_images[0] if previous_images else (None if prior else current_image)
-    manifest["subject"] = {**subject.describe(), "image_id": started_with}
+    previous_content = (manifest.get("subject") or {}).get("image_content")
+    manifest["subject"] = {**subject.describe(), "image_id": started_with,
+                           "image_content": previous_content or (None if prior else image_content(subject.image))}
     manifest.setdefault("resumes", []).append({
         "ts": int(time.time()),
         "agent_model": current_model,
@@ -623,7 +652,7 @@ def _summarise(manifest_path: Path) -> None:
 
     # One batch must mean one model, or its numbers cannot be compared. A resumed
     # batch records the model per case, so say plainly when they disagree.
-    images = sorted({e["agent_image_id"] for e in manifest["cases"] if e.get("agent_image_id")})
+    _, images = recorded_images({"cases": manifest["cases"]})
     if len(images) > 1:
         console.print(f"[bold red]⚠ This batch mixes agent images {images} — its cases are not "
                       f"comparable with each other.[/bold red]")

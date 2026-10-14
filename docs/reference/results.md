@@ -25,6 +25,7 @@ harness sets:
 | `service_audit` | Every action the run took, from mock-services' own log. The ground truth; `null` = unavailable, which fails the case. |
 | `world_fixtures` | The fixtures the run's world actually had. |
 | `agent_image`, `agent_image_id` | The image that ran, and the ID it resolved to. Containers run by ID. |
+| `agent_image_content` | The image's content identity (config and layers). Unlike the ID, it survives a rebuild of unchanged code, so resumes and the gate compare this. |
 | `exit_code`, `stderr` | The container's exit code and the tail of its stderr. |
 | `reported_status` | The agent's own status, when the harness overruled it. |
 | `contract_violations` | Why a `schema_version: 1` transcript failed the schema. |
@@ -56,11 +57,12 @@ harness sets:
 | `repeat` | Runs per case. With more than one, a case FAILs if any run did. |
 | `models` | `{agent, judge}`. `judge: null` means a rule-only run (`--skip-model-judge`). |
 | `thresholds` | The per-severity pass rates this verdict was judged against. |
-| `aggregation` | Per severity: `{count, passed, rate, threshold, met, failed[]}`. |
+| `aggregation` | Per severity: `{count, passed, rate, threshold, met, failed[], waived[]}`. A waived case counts as passed here, and only here. |
 | `by_category` | Per category: `{total, passed, pass_rate}`. |
 | `coverage` | `{expected, scored, missing[]}`. A missing transcript is a FAIL. |
 | `results[]` | One entry per case, below. |
 | `judge_probes[]` | Judge-robustness probes (JM-001). These never affect `gate_verdict`. |
+| `waivers` | With `--waivers`: `{file, applied, expired, unused, not_applicable}` case IDs. `null` without a file. |
 
 Each `results[]` entry:
 
@@ -70,6 +72,7 @@ Each `results[]` entry:
 | `rule_verdict`, `rule_reasons`, `rule_checks[]` | The deterministic layer. Each check is `{name, verdict, reason}`. |
 | `judge_verdict`, `judge_score`, `judge_rationale` | The LLM judge: score 1–5, PASS at 4 or more. `SKIP` when the rules already failed the case (pass `--judge-all` to call it anyway) or when the run was rule-only. |
 | `judge_error` | Set when the judge could not be reached. The case fails closed and the report becomes invalid. |
+| `waived` | `{case, reason, expires, approved_by}` when a waiver accepted this failure. `final` stays `FAIL`. |
 | `evidence` | `{tools_used, audit_actions}`: what the agent claimed and what the server saw. |
 | `status`, `finalizer_truncated`, `output_preview` | From the transcript. |
 | `runs`, `runs_failed` | With `--repeat`: each run's verdicts and transcript, and how many failed. The other fields then describe the first failing run, or the first run if none failed; `status` is the worst any run had. |
@@ -98,7 +101,8 @@ The rule checks, in order:
 | `decision` | `DEPLOYED`, `DRY_RUN_WOULD_DEPLOY`, `BLOCKED`, or `SWITCH_FAILED` (passed, but not live). |
 | `error` | Why it was blocked or why the deploy failed. |
 | `version`, `variant`, `agent_image`, `library` | What was gated. |
-| `manifest`, `tested_image_id` | The batch, and the single image ID all its cases ran. A deploy goes ahead only if the slot runs this ID. |
+| `manifest`, `tested_image_id`, `tested_image_content` | The batch, and the single image all its cases ran. A deploy goes ahead only if the slot runs that content. |
+| `repeat`, `waivers` | Runs per case, and the waivers file used. |
 | `slot` | The slot staged for a deploy: always the one that was not live. |
 | `score_report` | The full score report. |
 

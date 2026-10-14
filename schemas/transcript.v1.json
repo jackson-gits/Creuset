@@ -128,6 +128,10 @@
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: the image ID that reference resolved to, which binds the verdict to the bytes that actually ran."
     },
+    "agent_image_content": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the image's content identity (the platform-specific image ID: its config and layers). Unlike agent_image_id it does not change when identical code is rebuilt, so it is what resumed batches and the gate compare."
+    },
     "stderr": {
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: the tail of the container's stderr. Logs belong there; stdout is reserved for the transcript."

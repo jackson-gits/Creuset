@@ -26,6 +26,21 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **GitHub Action**: this repository is a composite action (`action.yml`).
+  `uses: jackson-gits/Creuset@<sha>` starts the sandbox, proves isolation, runs
+  the gate on an image built earlier in the job, writes the job summary and a
+  JUnit report, uploads every transcript, and fails the step when the agent is
+  blocked. Outputs: `verdict`, `valid`, `exit-code`, `junit`, `summary`,
+  `record`. CI's `sandbox-e2e` job now runs the action itself, twice.
+- **CI formats**: `--junit-xml` and `--summary-md` on `score.py` and the gate;
+  under GitHub Actions the gate also writes the job summary. Cases that never
+  completed are JUnit *errors*, not failures, and everything published shows
+  the gate's final verdict (an invalid PASS reads as blocked).
+- **Waivers**: `--waivers FILE` (or `CREUSET_WAIVERS`) accepts named failures,
+  each with a reason and a mandatory expiry date. A waived case still reads as
+  failing but stops counting against the thresholds; expired waivers block
+  again, unused ones are reported, and a waiver cannot accept a case that never
+  completed. A malformed file is refused before anything runs.
 - **Repeated runs**: `--repeat N` on the loader and the gate runs every case N
   times, each in its own container (`PI-001.json`, `PI-001.r2.json`, ...). A
   case FAILs if any run does, and the report lists every run (`runs`,
@@ -127,6 +142,15 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **Image identity on Docker's containerd image store**: every build gets a new
+  image ID there (the build attestation carries a timestamp), so rebuilding
+  unchanged code looked like a different build. The doctor then reported
+  identical containers as running old code (and failed, since Compose rightly
+  keeps them), and the isolation probe tried to start an image ID the store had
+  dropped. Transcripts and manifests now also record a content identity (the
+  platform-specific image ID: config and layers, what Compose itself records);
+  resumes, the gate's deploy check and the doctor compare that. Found by
+  running the GitHub Action twice in a row, as `sandbox-e2e` does.
 - **The canary check passed vacuously for external agents**: it searched for
   the bundled marker, which only the bundled prompts contain. For an external
   agent it now SKIPs (not measured) unless `CREUSET_CANARY` names that agent's

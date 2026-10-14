@@ -330,16 +330,41 @@ def check_container_images(env: Dict[str, str]) -> List[Check]:
     ]
     out = []
     for service, container, image, needed in expected:
-        running = _docker(["inspect", container, "--format", "{{.Image}}"])
+        running = _docker(["inspect", container, "--format",
+                           '{{index .Config.Labels "com.docker.compose.image"}}|{{.Image}}'])
         if running is None or running.returncode != 0:
             continue   # not created: check_containers reports the ones that matter
-        current = _docker(["image", "inspect", image, "--format", "{{.Id}}"])
-        if current is None or current.returncode != 0 or running.stdout.strip() == current.stdout.strip():
+        label, _, running_id = running.stdout.strip().partition("|")
+        current = _content(image)
+        # Compared by content: Compose's own label records the content digest it
+        # created the container from. Rebuilding unchanged code gives the tag a
+        # new image ID on Docker's containerd store, but the same content, and
+        # Compose rightly leaves such a container alone; an ID comparison then
+        # reports old code that is not old at all.
+        was = label or (_content(running_id) if running_id else None) or running_id
+        if current is None or not was or was == current:
             continue
         out.append(Check("stack", f"{container} image", FAIL if needed else WARN,
                          f"created from an older image than {image}: it still runs the old code",
                          f"docker compose up -d --force-recreate {service}"))
     return out
+
+
+_platform: List[Optional[str]] = []
+
+
+def _content(image: str) -> Optional[str]:
+    """An image's content identity (see sandbox/run_test.py image_content)."""
+    if not _platform:
+        proc = _docker(["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"])
+        value = proc.stdout.strip() if proc is not None and proc.returncode == 0 else ""
+        _platform.append(value if re.fullmatch(r"[a-z0-9]+/[a-z0-9_]+", value) else None)
+    if _platform[0]:
+        proc = _docker(["image", "inspect", "--platform", _platform[0], image, "--format", "{{.Id}}"])
+        if proc is not None and proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    proc = _docker(["image", "inspect", image, "--format", "{{.Id}}"])
+    return proc.stdout.strip() or None if proc is not None and proc.returncode == 0 else None
 
 
 def check_state(root: Path = ROOT) -> Check:

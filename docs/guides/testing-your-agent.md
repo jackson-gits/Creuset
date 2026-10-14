@@ -260,37 +260,73 @@ The gate's exit code is stable:
 | 2 | Rejected before anything ran: bad arguments, image, library or judge config |
 | 3 | PASS, but a requested deploy did not complete (bundled agent only) |
 
-A job modelled on this repository's own `sandbox-e2e`, which runs the scripted
-example on every push:
+On GitHub, the gate is one step. This repository is a composite action
+([`action.yml`](../../action.yml)): it starts the sandbox, proves isolation, runs
+the gate, writes the job summary and a JUnit report, uploads every transcript as
+an artifact, and fails the step if the agent is blocked. Its own CI runs it on
+every push (`sandbox-e2e`).
 
 ```yaml
-gate:
-  runs-on: ubuntu-latest
-  env:
-    LLM_API_KEY: ${{ secrets.LLM_API_KEY }}     # only llm-proxy and the judge see it
-    AGENT_MODEL: openai/gpt-oss-20b
-    JUDGE_API_BASE: https://api.groq.com/openai/v1
-    JUDGE_MODEL: openai/gpt-oss-120b
-    CREUSET_AGENT_IMAGE: my-agent:${{ github.sha }}
-  steps:
-    - uses: actions/checkout@v4
-      with: { repository: jackson-gits/Creuset, path: creuset }
-    - uses: actions/checkout@v4
-      with: { path: agent }
-    - uses: actions/setup-python@v5
-      with: { python-version: "3.11" }
-    - run: docker build -t "$CREUSET_AGENT_IMAGE" agent
-    - working-directory: creuset
-      run: |
-        pip install -r requirements.txt
-        docker compose build mock-services
-        docker compose up -d --wait llm-proxy mock-services
-        python scripts/doctor.py --probe --online
-        python gate/run_gate.py --version "${{ github.sha }}" --variant ci \
-          --library ../agent/creuset-cases.yaml --dry-run
+jobs:
+  agent-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t my-agent:${{ github.sha }} .
+      - uses: jackson-gits/Creuset@main       # pin a commit SHA in real use
+        with:
+          agent-image: my-agent:${{ github.sha }}
+          library: security/creuset-cases.yaml
+          llm-api-key: ${{ secrets.LLM_API_KEY }}   # only llm-proxy and the judge see it
+          agent-model: openai/gpt-oss-20b
+          judge-api-base: https://api.groq.com/openai/v1
+          judge-model: openai/gpt-oss-120b
+          canary: ACME-7Q2X9                        # the marker in your system prompt
+          waivers: security/creuset-waivers.yaml
+          repeat: "3"
 ```
 
-Drop the judge variables and add `--skip-model-judge` for a rule-only gate.
+`skip-model-judge: "true"` gives a rule-only gate that needs no judge
+configuration. For a Claude agent, add `llm-upstream-host: api.anthropic.com`,
+`llm-auth-header: x-api-key` and `llm-allowed-endpoints: messages|models`. The
+outputs (`verdict`, `valid`, `exit-code`, `junit`, `summary`, `record`) feed
+later steps; with `fail-on-block: "false"` the step reports instead of failing.
+
+Anywhere else, the same commands run from a checkout:
+
+```bash
+docker compose build mock-services && docker compose up -d --wait llm-proxy mock-services
+python scripts/doctor.py --probe --online
+python gate/run_gate.py --version "$CI_COMMIT_SHA" --variant ci --dry-run \
+    --agent-image my-agent:latest --library ../agent/creuset-cases.yaml \
+    --junit-xml creuset-junit.xml --summary-md creuset-summary.md
+```
+
+GitLab, Jenkins and most other CI systems render `--junit-xml` as a test report.
+Failures there are findings about the agent; cases that never completed are
+reported as errors, because they are infrastructure, not findings.
+
+### Adopting the gate on an existing agent: waivers
+
+Pointed at an agent that is already in production, the gate will usually find
+something on day one, and a gate that blocks every deploy gets switched off.
+A waivers file accepts specific failures, in writing, until a date:
+
+```yaml
+waivers:
+  - case: ACME-014
+    reason: Leaks order notes to other customers; fix tracked in SEC-142.
+    expires: 2026-12-31
+    approved_by: security@acme.example
+```
+
+A waived case still shows as failing in every report; it just stops counting
+against the thresholds. An expired waiver blocks again (and the summary says
+which), a waiver whose case now passes is reported unused, and a waiver cannot
+accept a case that never completed. Malformed files are refused before anything
+runs, never read as "no waivers". Pass it as `--waivers` or the action's
+`waivers` input.
+
 Provider quota is the binding constraint on free tiers: a full suite with the
 judge costs tens of thousands of tokens, so see the README's
 [rate limits](../../README.md#provider-rate-limits-read-this-before-a-long-run)

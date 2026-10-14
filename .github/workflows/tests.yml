@@ -108,49 +108,52 @@ jobs:
   # real Docker stack, which the unit tests can only simulate.
   sandbox-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      LLM_API_KEY: ci-placeholder
-      AGENT_MODEL: ci-placeholder
-      LLM_UPSTREAM_HOST: api.groq.com
-      MOCK_STRICT_RUNS: "1"
-      GATE_WORKERS: "1"
-      # The subject. The doctor then checks this image instead of the bundled agent.
-      CREUSET_AGENT_IMAGE: creuset-example-scripted:ci
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - name: Build the example agent
+        run: docker build -t creuset-example-scripted:ci examples/scripted-agent
+
+      # The action from this repository, exactly as another project would use it
+      # (uses: jackson-gits/Creuset@<ref>). Twice in one job, as a real pipeline
+      # gating two configurations would: the second must not trip over the
+      # first's containers.
+      - name: Gate the careful variant (must pass)
+        id: careful
+        uses: ./
         with:
-          python-version: "3.11"
-          cache: "pip"
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases.yaml
+          variant: careful
+          skip-model-judge: "true"
+          repeat: "2"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Gate the naive variant (must be blocked)
+        id: naive
+        uses: ./
+        with:
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases.yaml
+          variant: naive
+          skip-model-judge: "true"
+          fail-on-block: "false"
 
-      - name: Build and start the sandbox
+      - name: The verdicts are the expected ones
+        env:
+          CAREFUL: ${{ steps.careful.outputs.verdict }}/${{ steps.careful.outputs.exit-code }}/${{ steps.careful.outputs.valid }}
+          NAIVE: ${{ steps.naive.outputs.verdict }}/${{ steps.naive.outputs.exit-code }}/${{ steps.naive.outputs.valid }}
+          JUNIT: ${{ steps.naive.outputs.junit }}
         run: |
-          docker compose build mock-services
-          docker build -t creuset-example-scripted:ci examples/scripted-agent
-          docker compose up -d --wait llm-proxy mock-services
-
-      - name: Doctor
-        run: python scripts/doctor.py --probe
-
-      - name: The gate passes the careful agent and blocks the naive one
-        run: |
-          set -u   # not -e: a blocked gate exits 1, and that is the expected outcome here
-          gate() {   # the image comes from CREUSET_AGENT_IMAGE
-            python gate/run_gate.py --version ci --variant "$1" --skip-model-judge --dry-run \
-              --library examples/scripted-agent/cases.yaml
-          }
-          careful=0; gate careful || careful=$?
-          naive=0; gate naive || naive=$?
-          echo "careful -> $careful (want 0), naive -> $naive (want 1)"
-          test "$careful" -eq 0 && test "$naive" -eq 1
+          echo "careful: $CAREFUL (want PASS/0/true), naive: $NAIVE (want FAIL/1/true)"
+          test "$CAREFUL" = "PASS/0/true" && test "$NAIVE" = "FAIL/1/true"
+          grep -q '<failure' "$JUNIT"
 
       - name: Container logs
         if: failure()
+        env:   # Compose will not parse the file without them
+          LLM_API_KEY: unused
+          AGENT_MODEL: unused
         run: docker compose logs --no-color llm-proxy mock-services

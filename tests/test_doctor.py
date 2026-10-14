@@ -107,9 +107,14 @@ def test_a_missing_mock_services_image_fails_but_router_only_warns(fake_docker, 
     assert checks["router"].status == "warn"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_platform_cache(monkeypatch):
+    monkeypatch.setattr(doctor, "_platform", [])
+
+
 def test_containers_running_an_outdated_image(fake_docker):
-    fake_docker["inspect mock-services"] = _proc("sha256:old\n")
-    fake_docker["inspect agent-blue"] = _proc("sha256:old\n")
+    fake_docker["inspect mock-services"] = _proc("sha256:old|sha256:oldindex\n")
+    fake_docker["inspect agent-blue"] = _proc("sha256:old|sha256:oldindex\n")
     fake_docker["image inspect"] = _proc("sha256:new\n")
     checks = {c.name: c for c in doctor.check_container_images({})}
     assert checks["mock-services image"].status == "fail"
@@ -164,3 +169,13 @@ def test_a_working_gateway(fake_docker):
     fake_docker["inspect mock-services"] = _proc("sha256:mock\n")
     fake_docker["run"] = _proc("200\n")
     assert doctor.check_gateway_online({}).status == "ok"
+
+
+
+def test_identical_code_rebuilt_is_not_reported_as_old(fake_docker):
+    """A new image ID with the same content: Compose keeps the container, and is right to."""
+    fake_docker["version"] = _proc("linux/amd64\n")
+    fake_docker["inspect mock-services"] = _proc("sha256:content|sha256:old-index\n")
+    fake_docker["image inspect --platform linux/amd64"] = _proc("sha256:content\n")
+    fake_docker["image inspect"] = _proc("sha256:new-index\n")
+    assert doctor.check_container_images({}) == []

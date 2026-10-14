@@ -37,6 +37,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -75,7 +76,9 @@ sys.path.insert(0, str(_ROOT / "deploy"))
 sys.path.insert(0, str(_ROOT / "sandbox"))
 sys.path.insert(0, str(_ROOT / "judge"))
 from model_judge import JudgeConfigError, check_config  # noqa: E402
-from run_test import AGENT_IMAGE, image_id, parse_agent_env, subject_problem  # noqa: E402
+from report_formats import junit_error, junit_xml, markdown_summary  # noqa: E402
+from waivers import load_waivers  # noqa: E402
+from run_test import AGENT_IMAGE, image_content, image_id, parse_agent_env, subject_problem  # noqa: E402
 from switch import StateError, inactive_slot, load_state, validate_build  # noqa: E402
 
 
@@ -125,7 +128,8 @@ def _run_attack_suite(variant: str, library: Optional[Path] = None,
     return manifest
 
 
-def _run_scorer(manifest: Path, skip_model_judge: bool) -> Optional[Dict[str, Any]]:
+def _run_scorer(manifest: Path, skip_model_judge: bool,
+                waivers: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """
     Run the judge/scorer on the batch manifest.
     Returns the parsed score report dict, or None on failure.
@@ -143,6 +147,8 @@ def _run_scorer(manifest: Path, skip_model_judge: bool) -> Optional[Dict[str, An
     ]
     if skip_model_judge:
         cmd.append("--skip-model-judge")
+    if waivers:
+        cmd += ["--waivers", str(waivers)]
 
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
@@ -163,15 +169,37 @@ def tested_image_id(manifest_path: Optional[Path]) -> Optional[str]:
     The one image ID every case in the batch ran, or None if the batch does not
     record it or ran more than one (a resumed batch that mixed builds).
     """
+    manifest = _read_manifest(manifest_path)
+    if manifest is None:
+        return None
+    ids = {e.get("agent_image_id") for e in manifest.get("cases", [])}
+    ids.add((manifest.get("subject") or {}).get("image_id"))
+    return ids.pop() if len(ids) == 1 else None
+
+
+def tested_image_content(manifest_path: Optional[Path]) -> Optional[str]:
+    """
+    The one content identity every case ran (run_test.image_content), or None.
+    This, not the ID, is what a deploy must match: rebuilding unchanged code
+    changes the ID on Docker's containerd store, and identical bytes are
+    exactly what may be deployed.
+    """
+    manifest = _read_manifest(manifest_path)
+    if manifest is None:
+        return None
+    contents = {e.get("agent_image_content") for e in manifest.get("cases", [])}
+    contents.add((manifest.get("subject") or {}).get("image_content"))
+    return contents.pop() if len(contents) == 1 else None
+
+
+def _read_manifest(manifest_path: Optional[Path]) -> Optional[Dict[str, Any]]:
     if manifest_path is None:
         return None
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    ids = {e.get("agent_image_id") for e in manifest.get("cases", [])}
-    ids.add((manifest.get("subject") or {}).get("image_id"))
-    return ids.pop() if len(ids) == 1 else None
+    return manifest if isinstance(manifest, dict) else None
 
 
 def _write_gate_record(
@@ -216,6 +244,45 @@ def _judge_problem(skip_model_judge: bool) -> Optional[str]:
     except JudgeConfigError as e:
         return f"LLM judge misconfigured: {e} (or pass --skip-model-judge)"
     return None
+
+
+def _publish(score_report: Optional[Dict[str, Any]], verdict: str, decision: str, error: Optional[str],
+             junit: Optional[Path], summary_md: Optional[Path]) -> None:
+    """
+    The outcome in CI's own formats: JUnit XML, a Markdown summary, and, under
+    GitHub Actions, the job summary. Reflects the gate's final verdict, which can
+    be stricter than the scorer's (an invalid PASS is blocked). Best effort: a
+    report that cannot be written must not change the decision or exit code.
+    """
+    markdown = xml = None
+    if score_report is not None:
+        try:
+            final = {**score_report, "gate_verdict": verdict}
+            markdown = markdown_summary(final, decision) + (f"\n**{error}**\n" if error else "")
+            xml = junit_xml(final)
+        except Exception as e:  # pylint: disable=broad-except - never let formatting decide the gate
+            console.print(f"[yellow]Could not format the report ({type(e).__name__}: {e}).[/yellow]")
+            error = error or f"The report could not be formatted ({type(e).__name__})."
+    if markdown is None or xml is None:
+        head = "✅ PASS" if verdict == "PASS" else "❌ FAIL"
+        markdown = f"### Creuset gate: {head} ({decision.replace('_', ' ').lower()})\n\n{error or ''}\n"
+        xml = junit_error(error or "The gate produced no report.")
+    targets = [(junit, xml), (summary_md, markdown)]
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    for path, text in targets:
+        if path is None:
+            continue
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError as e:
+            console.print(f"[yellow]Could not write {path}: {e}[/yellow]")
+    if step_summary:
+        try:
+            with open(step_summary, "a", encoding="utf-8") as f:
+                f.write(markdown + "\n")
+        except OSError as e:
+            console.print(f"[yellow]Could not write the GitHub job summary: {e}[/yellow]")
 
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
@@ -266,7 +333,8 @@ def _do_switch(slot: str, version: str, variant: str) -> bool:
     return result.returncode == 0
 
 
-def _deploy(version: str, variant: str, tested: Optional[str]) -> Dict[str, Any]:
+def _deploy(version: str, variant: str, tested: Optional[str],
+            tested_content: Optional[str] = None) -> Dict[str, Any]:
     """
     Stage the gated build in the inactive slot and move traffic to it.
 
@@ -280,23 +348,28 @@ def _deploy(version: str, variant: str, tested: Optional[str]) -> Dict[str, Any]
     except StateError as e:
         return {"ok": False, "slot": None, "error": f"deploy state unreadable: {e}"}
 
-    if tested is None:
+    if tested is None and tested_content is None:
         return {"ok": False, "slot": slot,
-                "error": "the batch does not record a single image ID for what it tested"}
-    current = image_id(AGENT_IMAGE)
-    if current != tested:
+                "error": "the batch does not record a single image for what it tested"}
+    # By content when the batch recorded it (identical bytes rebuilt are still
+    # the tested bytes), else by ID as batches always were.
+    expected = tested_content or tested
+    current = image_content(AGENT_IMAGE) if tested_content else image_id(AGENT_IMAGE)
+    if current != expected:
         return {"ok": False, "slot": slot,
-                "error": f"{AGENT_IMAGE} is now {current or 'missing'}, but the gate tested {tested}: "
-                         f"it was rebuilt during the run. Re-run the gate on the new build."}
+                "error": f"{AGENT_IMAGE} is now {current or 'missing'}, but the gate tested {expected}: "
+                         f"it changed during the run. Re-run the gate on the new build."}
 
     problem = _stage_slot(slot, version, variant)
     if problem:
         return {"ok": False, "slot": slot, "error": problem}
-    running = _slot_image_id(slot)
-    if running != tested:
+    running = _slot_image_id(slot)   # the container's image ID, as created
+    if tested_content and running:
+        running = image_content(running)
+    if running != expected:
         return {"ok": False, "slot": slot,
-                "error": f"the {slot} slot runs {running or 'nothing'}, not the tested image {tested}"}
-    console.print(f"[green]✓ {slot} slot is running the gated image {tested[:19]}.[/green]")
+                "error": f"the {slot} slot runs {running or 'nothing'}, not the tested image {expected}"}
+    console.print(f"[green]✓ {slot} slot is running the gated image {expected[:19]}.[/green]")
 
     if not _do_switch(slot, version, variant):
         return {"ok": False, "slot": slot, "error": f"switch.py could not move traffic to {slot}"}
@@ -321,6 +394,12 @@ def main(
                                                   help="KEY=VALUE lines for the agent's container. Never secrets."),
     repeat: int = typer.Option(1, "--repeat", min=1, max=50,
                                help="Run every case this many times; a case FAILs if any run does."),
+    waivers: Optional[Path] = typer.Option(None, "--waivers", envvar="CREUSET_WAIVERS",
+                                           help="Accepted failures, each with a reason and an expiry date."),
+    junit: Optional[Path] = typer.Option(None, "--junit-xml", help="Also write the outcome as JUnit XML."),
+    summary_md: Optional[Path] = typer.Option(None, "--summary-md",
+                                              help="Also write a Markdown summary (added to the GitHub job "
+                                                   "summary automatically under Actions)."),
 ) -> None:
     """
     Run the full Creuset deployment gate.
@@ -345,10 +424,16 @@ def main(
             parse_agent_env(agent_env or (), agent_env_file)
         except (OSError, ValueError) as e:
             problem = f"agent settings: {e}"
+    if not problem and waivers is not None:
+        try:
+            load_waivers(waivers)
+        except ValueError as e:   # checked before the suite spends quota, never "no waivers"
+            problem = f"waivers: {e}"
     problem = problem or _judge_problem(skip_model_judge)
     if problem:
         record = _write_gate_record(version, _variant, None, "FAIL", "BLOCKED",
                                     error=f"Rejected before running: {problem}")
+        _publish(None, "FAIL", "BLOCKED", f"Rejected before running: {problem}", junit, summary_md)
         console.print(f"[bold red]⛔ GATE BLOCKED[/bold red] — {problem}. Audit: {record}")
         raise typer.Exit(code=EXIT_REJECTED)
 
@@ -376,20 +461,23 @@ def main(
             version, _variant, None, "FAIL", "BLOCKED",
             error="Attack suite runner failed or produced no manifest.",
         )
+        _publish(None, "FAIL", "BLOCKED", "Attack suite runner failed or produced no manifest.", junit, summary_md)
         console.print(f"\n[bold red]⛔ GATE BLOCKED[/bold red] — sandbox failure. Audit: {record}")
         raise typer.Exit(code=EXIT_BLOCKED)
 
     console.print(f"[green]✓ Batch manifest:[/green] {manifest}")
     tested = tested_image_id(manifest)
+    tested_content = tested_image_content(manifest)
 
     # ── Step 2: Score ─────────────────────────────────────────────────────────
-    score_report = _run_scorer(manifest, skip_model_judge)
+    score_report = _run_scorer(manifest, skip_model_judge, waivers)
 
     if score_report is None:
         record = _write_gate_record(
             version, _variant, None, "FAIL", "BLOCKED",
             error="Scorer failed or produced no report.", manifest=str(manifest),
         )
+        _publish(None, "FAIL", "BLOCKED", "Scorer failed or produced no report.", junit, summary_md)
         console.print(f"\n[bold red]⛔ GATE BLOCKED[/bold red] — scorer failure. Audit: {record}")
         raise typer.Exit(code=EXIT_BLOCKED)
 
@@ -417,7 +505,7 @@ def main(
             exit_code = EXIT_PASS
             console.print("[bold yellow]⚡ Dry run — would deploy. Skipping the switch.[/bold yellow]")
         else:
-            outcome = _deploy(version, _variant, tested)
+            outcome = _deploy(version, _variant, tested, tested_content)
             slot = outcome["slot"]
             if outcome["ok"]:
                 decision, exit_code = "DEPLOYED", EXIT_PASS
@@ -438,11 +526,13 @@ def main(
     # ── Audit record ──────────────────────────────────────────────────────────
     record_path = _write_gate_record(
         version, _variant, score_report, gate_verdict, decision, error=note,
-        manifest=str(manifest), tested_image_id=tested, slot=slot,
+        manifest=str(manifest), tested_image_id=tested, tested_image_content=tested_content, slot=slot,
         library=str((library or _ATTACK_LIB).resolve()),
         agent_image=agent_image or AGENT_IMAGE,
         repeat=repeat,
+        waivers=str(waivers) if waivers else None,
     )
+    _publish(score_report, gate_verdict, decision, note, junit, summary_md)
     console.print(f"\n[bold]Audit record:[/bold] {record_path}")
 
     raise typer.Exit(code=exit_code)

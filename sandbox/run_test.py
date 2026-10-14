@@ -366,6 +366,47 @@ def image_id(image: str) -> Optional[str]:
     return ident if proc.returncode == 0 and ident else None
 
 
+_platform_cache: List[Optional[str]] = []
+
+
+def _server_platform() -> Optional[str]:
+    """The daemon's os/arch (linux/amd64), asked once per process."""
+    if not _platform_cache:
+        try:
+            proc = _docker(["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"], timeout=20)
+            value = proc.stdout.strip() if proc.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            value = ""
+        _platform_cache.append(value if re.fullmatch(r"[a-z0-9]+/[a-z0-9_]+", value) else None)
+    return _platform_cache[0]
+
+
+def image_content(image: str) -> Optional[str]:
+    """
+    What `image` IS, as opposed to which build produced it.
+
+    Docker's containerd image store wraps every build in a new index (its build
+    attestation carries a timestamp), so rebuilding unchanged code gives a new
+    image ID. Comparing IDs then calls identical bytes "a different build". The
+    platform-specific image ID is the digest of the image config and its layers:
+    stable across identical rebuilds, different the moment anything changes, and
+    what Compose itself records (com.docker.compose.image). Without --platform
+    support (an older Docker), the plain ID, which on the classic store is
+    already that digest.
+    """
+    platform = _server_platform()
+    if platform:
+        try:
+            proc = _docker(["image", "inspect", "--platform", platform, image, "--format", "{{.Id}}"],
+                           timeout=30)
+            ident = proc.stdout.strip()
+            if proc.returncode == 0 and ident:
+                return ident
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return image_id(image)
+
+
 def _failure(case_id: str, subject: Subject, run_id: str, status: str, error: str, elapsed: float,
              image_ref: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
     return {
@@ -384,6 +425,7 @@ def _failure(case_id: str, subject: Subject, run_id: str, status: str, error: st
         "elapsed_seconds": round(elapsed, 2),
         "agent_image": subject.image,
         "agent_image_id": image_ref,
+        "agent_image_content": image_content(image_ref) if image_ref else None,
         **extra,
     }
 
@@ -459,7 +501,7 @@ def isolation_probe() -> Dict[str, Any]:
     and that image is always present and always has Python, whereas an external
     agent image may have neither.
     """
-    inspect = _docker(["inspect", MOCK_CONTAINER, "--format", "{{.Image}}"])
+    inspect = _docker(["inspect", MOCK_CONTAINER, "--format", "{{.Config.Image}}"])
     probe_image = inspect.stdout.strip()
     if inspect.returncode != 0 or not probe_image:
         return {"ok": False, "error": f"container '{MOCK_CONTAINER}' not found; start the infrastructure first"}
@@ -649,6 +691,7 @@ def _finish(case_id: str, subject: Subject, run_id: str, image_ref: str, fixture
         "elapsed_seconds": round(elapsed, 2),
         "agent_image": subject.image,
         "agent_image_id": image_ref,
+        "agent_image_content": image_content(image_ref),
         "exit_code": proc.returncode,
     })
     if stderr:

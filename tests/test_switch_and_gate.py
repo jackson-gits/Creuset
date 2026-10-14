@@ -89,7 +89,7 @@ def gate_env(tmp_path, monkeypatch):
         return manifest
     monkeypatch.setattr(run_gate, "_run_attack_suite", suite)
 
-    def deploy(version, variant, tested):
+    def deploy(version, variant, tested, tested_content=None):
         calls["deploy"].append(tested)
         return {"ok": True, "slot": "green", "error": None}
     monkeypatch.setattr(run_gate, "_deploy", deploy)
@@ -243,7 +243,7 @@ def test_deploy_stages_the_inactive_slot(deploy_env, state_dir, live, expected):
 def test_deploy_refuses_a_rebuilt_tag(deploy_env, monkeypatch):
     monkeypatch.setattr(run_gate, "image_id", lambda image: "sha256:" + "c" * 64)
     outcome = run_gate._deploy("v2", "hardened", IMAGE)
-    assert not outcome["ok"] and "rebuilt" in outcome["error"]
+    assert not outcome["ok"] and "changed during the run" in outcome["error"]
     assert deploy_env == {"stage": [], "switch": []}
 
 
@@ -293,3 +293,43 @@ def test_repeat_passes_through_and_is_recorded(gate_env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls["suite_args"][-2:] == ["--repeat", "5"]
     assert _records(logs)[0]["repeat"] == 5
+
+
+
+# ── Content identity: rebuilding identical code is not a different build ──────
+
+CONTENT = "sha256:" + "e" * 64
+
+
+def test_a_deploy_by_content_accepts_identical_bytes_rebuilt(deploy_env, monkeypatch):
+    """On Docker's containerd store a rebuild of unchanged code gets a new ID, same content."""
+    monkeypatch.setattr(run_gate, "image_id", lambda image: "sha256:" + "f" * 64)   # a new ID
+    monkeypatch.setattr(run_gate, "image_content", lambda ref: CONTENT)          # the same bytes
+    outcome = run_gate._deploy("v2", "hardened", IMAGE, CONTENT)
+    assert outcome["ok"], outcome
+
+
+def test_a_deploy_by_content_refuses_changed_bytes(deploy_env, monkeypatch):
+    monkeypatch.setattr(run_gate, "image_content", lambda ref: "sha256:" + "9" * 64)
+    outcome = run_gate._deploy("v2", "hardened", IMAGE, CONTENT)
+    assert not outcome["ok"] and "changed during the run" in outcome["error"]
+    assert deploy_env == {"stage": [], "switch": []}
+
+
+def test_the_slot_is_checked_by_content_too(deploy_env, monkeypatch):
+    contents = {"creuset-agent:latest": CONTENT, IMAGE: "sha256:" + "8" * 64}
+    monkeypatch.setattr(run_gate, "AGENT_IMAGE", "creuset-agent:latest")
+    monkeypatch.setattr(run_gate, "image_content", lambda ref: contents.get(ref))
+    outcome = run_gate._deploy("v2", "hardened", IMAGE, CONTENT)
+    assert not outcome["ok"] and "not the tested image" in outcome["error"]
+    assert deploy_env["switch"] == []
+
+
+def test_tested_content_needs_one_content_across_the_batch(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"subject": {"image_content": CONTENT}, "cases": [
+        {"id": "A-001", "agent_image_content": CONTENT}, {"id": "A-002", "agent_image_content": CONTENT}]}))
+    assert run_gate.tested_image_content(path) == CONTENT
+    path.write_text(json.dumps({"subject": {"image_content": CONTENT}, "cases": [
+        {"id": "A-001", "agent_image_content": CONTENT}, {"id": "A-002"}]}))
+    assert run_gate.tested_image_content(path) is None

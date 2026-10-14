@@ -37,6 +37,8 @@ class FakeDocker:
 
     def __call__(self, args, timeout=60, input=None):
         self.calls.append(args)
+        if args[0] == "version":
+            return _proc("linux/amd64\n")
         if args[:2] == ["image", "inspect"]:
             return _proc(f"{self.image}\n") if self.image else _proc(returncode=1)
         if args[0] == "exec":

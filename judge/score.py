@@ -51,7 +51,9 @@ from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model_judge import JUDGE_MODEL, run_model_judge  # noqa: E402
+from report_formats import junit_xml, markdown_summary  # noqa: E402
 from rule_checks import CANARY_ENV, run_rule_checks  # noqa: E402
+from waivers import apply_waivers, counts_as_pass, load_waivers  # noqa: E402
 
 
 # Windows consoles/pipes default to cp1252; force UTF-8 so rich output never crashes.
@@ -237,7 +239,7 @@ def aggregate(results: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any], Dict[
         by_sev.setdefault(r["severity"], []).append(r)
         cat = by_cat.setdefault(r["category"], {"total": 0, "passed": 0})
         cat["total"] += 1
-        cat["passed"] += r["final"] == "PASS"
+        cat["passed"] += counts_as_pass(r)
 
     details: Dict[str, Any] = {}
     gate_pass = True
@@ -246,13 +248,15 @@ def aggregate(results: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any], Dict[
         if not cases:
             details[sev] = {"count": 0, "passed": 0, "rate": None, "threshold": threshold, "met": True}
             continue
-        passed = sum(r["final"] == "PASS" for r in cases)
+        passed = sum(counts_as_pass(r) for r in cases)
         rate = passed / len(cases)
         met = rate >= threshold - 1e-9
         gate_pass &= met
         details[sev] = {"count": len(cases), "passed": passed, "rate": round(rate, 4),
                         "threshold": threshold, "met": met,
-                        "failed": [r["test_id"] for r in cases if r["final"] != "PASS"]}
+                        "failed": [r["test_id"] for r in cases if not counts_as_pass(r)],
+                        # Failing, but accepted in writing until a date (judge/waivers.py).
+                        "waived": [r["test_id"] for r in cases if r.get("waived")]}
     for cat in by_cat.values():
         cat["pass_rate"] = round(cat["passed"] / cat["total"], 4)
     # Every threshold is trivially "met" by zero cases, which would let an empty
@@ -267,6 +271,7 @@ def score_manifest(
     skip_model_judge: bool = False,
     judge_all: bool = False,
     run_probes: bool = True,
+    waivers_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Score a batch manifest written by attacks/loader.py, enforcing coverage."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -306,11 +311,20 @@ def score_manifest(
         results = list(pool.map(_one, expected))
         probe_results = list(pool.map(run_judge_probe, probes)) if (run_probes and not skip_model_judge) else []
 
-    return build_report(results, probe_results, manifest, skip_model_judge)
+    return build_report(results, probe_results, manifest, skip_model_judge,
+                        _waive(results, waivers_path))
+
+
+def _waive(results: List[Dict[str, Any]], waivers_path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """Apply a waivers file to `results`; raises ValueError if it is malformed."""
+    if waivers_path is None:
+        return None
+    return apply_waivers(results, load_waivers(waivers_path), source=str(waivers_path))
 
 
 def build_report(results: List[Dict[str, Any]], probe_results: List[Dict[str, Any]],
-                 manifest: Dict[str, Any], skip_model_judge: bool) -> Dict[str, Any]:
+                 manifest: Dict[str, Any], skip_model_judge: bool,
+                 waivers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     gate_verdict, agg, by_cat = aggregate(results)
     missing = [r["test_id"] for r in results if r.get("status") == "missing"]
     judge_errors = [r["test_id"] for r in results if r.get("judge_error")]
@@ -348,6 +362,9 @@ def build_report(results: List[Dict[str, Any]], probe_results: List[Dict[str, An
         # The thresholds this verdict was reached against. THRESHOLD_* can be
         # overridden per run, so a verdict without them cannot be compared.
         "thresholds": dict(THRESHOLDS),
+        # Accepted failures (judge/waivers.py): which waivers applied, expired,
+        # went unused, or could not apply to an unmeasured case. None = no file.
+        "waivers": waivers,
         "gate_verdict": gate_verdict,
         "aggregation": agg,
         "by_category": by_cat,
@@ -370,8 +387,9 @@ def print_report(report: Dict[str, Any]) -> None:
         why = "; ".join(r["rule_reasons"]) if r["rule_reasons"] else (
             r["judge_rationale"] if r["judge_verdict"] == "FAIL" else "")
         score = f" {r['judge_score']}" if r.get("judge_score") else ""
+        final = _fmt(r["final"]) + (" [yellow](waived)[/yellow]" if r.get("waived") else "")
         table.add_row(r["test_id"], r["severity"], _fmt(r["rule_verdict"]),
-                      _fmt(r["judge_verdict"]) + score, _fmt(r["final"]), why[:140])
+                      _fmt(r["judge_verdict"]) + score, final, why[:140])
     console.print(table)
 
     for sev, d in report["aggregation"].items():
@@ -414,6 +432,16 @@ def print_report(report: Dict[str, Any]) -> None:
             outcome = "[red]was manipulated[/red]"
         console.print(f"  Judge probe {p['test_id']}: judge {outcome} "
                       f"(score {p['judge_score']}); rule layer {p['rule_verdict']} → combined {p['combined_verdict']}")
+    waivers = report.get("waivers") or {}
+    if waivers.get("applied"):
+        console.print(f"  [yellow]Waived (failing, accepted until a date): {waivers['applied']}[/yellow]")
+    if waivers.get("expired"):
+        console.print(f"  [red]Expired waivers, blocking again: {waivers['expired']}[/red]")
+    if waivers.get("not_applicable"):
+        console.print(f"  [yellow]Waivers that cannot apply to an unmeasured case: "
+                      f"{waivers['not_applicable']}[/yellow]")
+    if waivers.get("unused"):
+        console.print(f"  [dim]Unused waivers (the case passed; delete them): {waivers['unused']}[/dim]")
     color = "green" if report["gate_verdict"] == "PASS" else "red"
     console.print(f"\n[bold]Gate verdict: [{color}]{report['gate_verdict']}[/{color}][/bold]")
     if not report.get("valid", True):
@@ -436,10 +464,20 @@ def main(
     skip_model_judge: bool = typer.Option(False, "--skip-model-judge", help="Only run rule checks."),
     judge_all: bool = typer.Option(False, "--judge-all", help="Call the LLM judge even when rules already FAIL."),
     output: Optional[Path] = typer.Option(None, "--output", help="Path to write the score report JSON."),
+    waivers: Optional[Path] = typer.Option(None, "--waivers", envvar="CREUSET_WAIVERS",
+                                           help="Accepted failures, each with a reason and an expiry date."),
+    junit: Optional[Path] = typer.Option(None, "--junit-xml", help="Also write the results as JUnit XML."),
+    summary_md: Optional[Path] = typer.Option(None, "--summary-md", help="Also write a Markdown summary."),
 ) -> None:
     """Score transcripts with rule-based + model judge and print the aggregate gate verdict."""
+    if waivers is not None:
+        try:
+            load_waivers(waivers)
+        except ValueError as e:   # refused up front: never "no waivers" by accident
+            console.print(f"[red]✗ {e}[/red]")
+            raise typer.Exit(code=2)
     if manifest:
-        report = score_manifest(manifest, skip_model_judge, judge_all)
+        report = score_manifest(manifest, skip_model_judge, judge_all, waivers_path=waivers)
     else:
         cases = _all_cases(library)
         if transcript_dir:
@@ -460,13 +498,22 @@ def main(
         if not results:
             console.print("[red]No results scored.[/red]")
             raise typer.Exit(code=2)
-        report = build_report(results, [], {"variant": None, "library": None}, skip_model_judge)
+        report = build_report(results, [], {"variant": None, "library": None}, skip_model_judge,
+                              _waive(results, waivers))
 
     print_report(report)
     report_path = output or (_LOGS_DIR / f"score_report_{int(time.time())}.json")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     console.print(f"[bold]Score report:[/bold] {report_path}")
+    if junit:
+        junit.parent.mkdir(parents=True, exist_ok=True)
+        junit.write_text(junit_xml(report), encoding="utf-8")
+        console.print(f"[bold]JUnit XML:[/bold] {junit}")
+    if summary_md:
+        summary_md.parent.mkdir(parents=True, exist_ok=True)
+        summary_md.write_text(markdown_summary(report), encoding="utf-8")
+        console.print(f"[bold]Summary:[/bold] {summary_md}")
     raise typer.Exit(code=0 if report["gate_verdict"] == "PASS" else 1)
 
 
