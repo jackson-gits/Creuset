@@ -3,32 +3,36 @@ deploy/router.py
 ─────────────────
 Python FastAPI reverse-proxy — the non-optional default blue-green traffic router.
 
-Reads deploy/state/state.json (STATE_FILE) on every request to determine the
-active slot.
-Forwards all traffic to http://agent-{active}:8000.
+Reads state.json on every request to determine the active slot, and forwards
+all traffic to http://agent-{active}:8000. Where state.json is:
+  STATE_FILE                         if set (compose sets /app/state/state.json)
+  $CREUSET_STATE_DIR/state.json      otherwise, if set (as deploy/switch.py)
+  deploy/state/state.json            otherwise
 
 Port: 8080 (external-facing)
 Slots:
   blue  → http://agent-blue:8000  (or AGENT_BLUE_HOST:AGENT_BLUE_PORT)
   green → http://agent-green:8000 (or AGENT_GREEN_HOST:AGENT_GREEN_PORT)
 
-Why Python instead of Nginx (Fix #3 from reviewer):
+Why Python instead of Nginx:
   Nginx as a default requires reloading config files on every switch,
-  which adds operational complexity. This 40-line proxy reads state.json
+  which adds operational complexity. This small proxy reads state.json
   on every request — zero config reload needed. Nginx is documented as an
-  upgrade path in deploy/README.md for high-traffic production use.
+  upgrade path in the deployment docs for high-traffic production use.
 
-Design note (from reviewer):
-  state.json is single-writer. This is safe for a single-demo POC with
-  sequential gate runs. Not safe for concurrent gate runs; documented
-  limitation in README.
+Concurrency:
+  The router only reads state.json. deploy/switch.py serialises its writers
+  with a lockfile and replaces the file atomically, so the router never sees
+  a half-written state; one it cannot parse is refused (503), not guessed.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
+from typing import Mapping
 
 import httpx
 from dotenv import load_dotenv
@@ -39,10 +43,49 @@ load_dotenv()
 
 app = FastAPI(title="Creuset Router", version="1.0.0")
 
+
+def _state_file_from(env: Mapping[str, str]) -> Path:
+    """
+    STATE_FILE wins: compose sets it to the container's read-only mount. Then
+    CREUSET_STATE_DIR, which deploy/switch.py writes to — a router run on the
+    host must follow a relocated state dir, or it would keep routing on a file
+    switch.py no longer updates. A relative dir is anchored at the repo root,
+    exactly as switch.py anchors it.
+    """
+    if env.get("STATE_FILE"):
+        return Path(env["STATE_FILE"])
+    state_dir = (env.get("CREUSET_STATE_DIR") or "").strip()
+    if state_dir:
+        return Path(__file__).parent.parent / state_dir / "state.json"
+    return Path(__file__).parent / "state" / "state.json"
+
+
+def _upstream_timeout_from(env: Mapping[str, str]) -> float:
+    """
+    Seconds to wait on the active slot. /invoke runs a whole agent scenario,
+    which can outlast the 30 s default on a slow or rate-limited model. A value
+    that is not a positive, finite number stops the router from starting: an
+    unparseable timeout silently becoming "none" would let one hung slot hold
+    every connection open.
+    """
+    raw = (env.get("ROUTER_UPSTREAM_TIMEOUT") or "").strip()
+    if not raw:
+        return 30.0
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(f"ROUTER_UPSTREAM_TIMEOUT must be a positive number of seconds, got {raw!r}")
+    return value
+
+
 # In the container this is /app/state/state.json (deploy/state bind-mounted
-# read-only); on the host it is deploy/state/state.json — the same file
-# deploy/switch.py writes. It is re-read on every request: no reload on switch.
-_STATE_FILE = Path(os.getenv("STATE_FILE") or (Path(__file__).parent / "state" / "state.json"))
+# read-only); on the host it is the same file deploy/switch.py writes
+# (deploy/state unless CREUSET_STATE_DIR moves it). It is re-read on every
+# request: no reload on switch.
+_STATE_FILE = _state_file_from(os.environ)
+_UPSTREAM_TIMEOUT = _upstream_timeout_from(os.environ)
 
 _SLOTS = {
     "blue": (
@@ -142,7 +185,7 @@ async def proxy(request: Request, path: str) -> Response:
     if len(body) > _MAX_BODY_BYTES:
         return JSONResponse(status_code=413, content={"error": "Request body too large."})
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
         try:
             resp = await client.request(
                 method=request.method,

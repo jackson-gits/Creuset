@@ -1,0 +1,25 @@
+# Line endings. The repository stores LF; a checkout gets the platform's native
+# ending, except where the consumer of a file breaks on the wrong one.
+* text=auto
+
+# cmd.exe can misparse LF-only batch files inside multi-line ( ... ) blocks.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# Read by a POSIX shell, make or a Linux container (Dockerfiles, the llm-proxy
+# template and its entrypoint scripts), where a stray \r becomes part of a
+# command or value: `/bin/sh^M: bad interpreter`, an nginx directive ending \r.
+*.sh            text eol=lf
+*.envsh         text eol=lf
+*.template      text eol=lf
+Dockerfile*     text eol=lf
+Makefile        text eol=lf
+
+# Byte-exact fixtures compared by tests: identical on every platform.
+tests/snapshots/** text eol=lf
+
+# Never diffed or converted.
+*.png           binary
+*.jpg           binary
+*.ico           binary
+*.pdf           binary

@@ -88,8 +88,21 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env}
       LLM_UPSTREAM_HOST: ${LLM_UPSTREAM_HOST:-api.groq.com}
       LLM_PROXY_RESOLVER: ${LLM_PROXY_RESOLVER:-127.0.0.11}
+      # Provider profile, validated (and defaulted, for any unset here) by
+      # 05-creuset-validate.envsh. These defaults render the Groq config
+      # byte-for-byte; see that script for what each one may be.
+      LLM_UPSTREAM_SCHEME: ${LLM_UPSTREAM_SCHEME:-https}
+      LLM_UPSTREAM_PORT: ${LLM_UPSTREAM_PORT:-}
+      LLM_UPSTREAM_PATH_PREFIX: ${LLM_UPSTREAM_PATH_PREFIX:-}
+      LLM_ALLOWED_ENDPOINTS: "${LLM_ALLOWED_ENDPOINTS:-chat/completions|models}"
+      LLM_AUTH_HEADER: ${LLM_AUTH_HEADER:-Authorization}
+      LLM_AUTH_PREFIX: ${LLM_AUTH_PREFIX:-}
+      LLM_PROXY_EXTRA_CA_FILE: ${LLM_PROXY_EXTRA_CA_FILE:-}
     volumes:
       - ./deploy/llm-proxy:/etc/nginx/templates:ro
+      # Sourced by the image's entrypoint before the template is rendered. If it
+      # is missing, nginx refuses the config rather than start unvalidated.
+      - ./deploy/llm-proxy/05-creuset-validate.envsh:/docker-entrypoint.d/05-creuset-validate.envsh:ro
     # The one container holding the real key gets the tightest box: read-only
     # root (the rendered config, cache and pid file live in tmpfs) and only the
     # three capabilities the nginx master needs to hand workers to `nginx`.

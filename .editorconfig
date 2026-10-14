@@ -1,0 +1,42 @@
+# https://editorconfig.org
+#
+# Line endings are git's job (.gitattributes): LF in the repository, native in
+# your checkout. Only the files git pins to one ending are pinned here too, so
+# an editor never fights git over the rest.
+
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json,toml}]
+indent_size = 2
+
+[*.{js,css,html}]
+indent_size = 2
+
+# Two trailing spaces are a hard line break in Markdown.
+[*.md]
+trim_trailing_whitespace = false
+
+[{*.sh,*.envsh,*.template,Dockerfile*,Makefile}]
+end_of_line = lf
+
+[Makefile]
+indent_style = tab
+
+[*.{bat,cmd}]
+end_of_line = crlf
+indent_size = 2
+
+# Machine-written evidence and byte-exact fixtures: never reformat on save.
+[{logs/**,tests/snapshots/**}]
+charset = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+indent_style = unset
+indent_size = unset

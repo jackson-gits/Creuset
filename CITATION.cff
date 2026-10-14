@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use Creuset or its published measurements, please cite it as below."
+title: Creuset
+abstract: >-
+  Creuset is an adversarial security gate for tool-calling AI agents: it runs an
+  agent against a library of attack cases in an isolated Docker sandbox, scores
+  the transcripts with deterministic rules plus an LLM judge, and only promotes a
+  candidate whose results pass severity thresholds.
+type: software
+authors:
+  - given-names: Jackson
+license: Apache-2.0
+version: 0.1.0
+repository-code: "https://github.com/jackson-gits/creuset"
+keywords:
+  - llm-security
+  - ai-agents
+  - prompt-injection
+  - red-teaming
+  - devsecops

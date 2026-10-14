@@ -1,0 +1,6 @@
+Creuset
+Copyright 2026 Jackson and the Creuset contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+The attack library under attacks/ (attack_library.yaml, benign_tasks.yaml) is
+part of this product and is covered by the same license.

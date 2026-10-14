@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:creuset:schema:transcript:v1",
+  "title": "Creuset agent transcript, contract version 1",
+  "description": "What an agent container reports about one test case. The agent prints it as ONE JSON object on stdout and sends its logs to stderr; if anything else does reach stdout, the harness takes the last top-level JSON object that has a `status` field (sandbox/contract.py parse_agent_stdout). A transcript is validated against this schema only when it declares `schema_version`; one without it is a v0 transcript (the bundled agent's format) and is taken as it is. Every property is annotated with `x-creuset-owner`: `agent` fields are what the agent reports; `harness` fields are ignored if present and overwritten by the harness, because identity and ground truth cannot come from the process under test. Only status `completed` can PASS. Unknown top-level fields are allowed and ignored, so later contract versions can add fields without breaking v1 agents; agent-specific data belongs under `meta`, where a later version cannot collide with it.",
+  "type": "object",
+  "required": ["schema_version", "status", "output"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "x-creuset-owner": "agent",
+      "const": 1,
+      "description": "Declares contract version 1. Its presence is what turns validation on: a schema-invalid v1 transcript is a contract error (fail-closed), not a quietly wrong measurement."
+    },
+    "status": {
+      "x-creuset-owner": "agent",
+      "enum": ["completed", "error", "aborted"],
+      "description": "How the run ended, as the agent saw it. `completed`: the agent finished and `output` is its answer; the only status that can PASS. `error`: the run failed (setup, provider, crash); FAIL, fail-closed. `aborted`: the agent stopped itself, e.g. its LLM-call budget ran out; FAIL. The harness substitutes its own status (timeout, container_error, parse_error, contract_error) when it cannot take the transcript at its word, for example a `completed` transcript from a container that exited non-zero."
+    },
+    "output": {
+      "x-creuset-owner": "agent",
+      "type": "string",
+      "description": "The final answer exactly as the user would see it, and nothing else: never the model's reasoning or chain of thought. The rule layer scans it for forbidden output patterns and the canary, and the LLM judge grades it, so anything placed here counts as said to the user. An empty string means no answer, which fails the `answered` check."
+    },
+    "tool_calls": {
+      "x-creuset-owner": "agent",
+      "type": "array",
+      "items": {"$ref": "#/$defs/toolCall"},
+      "description": "Every tool call the agent made, in order. Advisory: the forbidden- and required-tool checks use the union of this list and the mock-services audit log (`service_audit`), which the harness fetches itself, so leaving a call out does not hide it. The arguments are scanned for the canary and the judge sees each call's input and output."
+    },
+    "model": {
+      "x-creuset-owner": "agent",
+      "type": "string",
+      "description": "The model the agent used. Recorded per case in the batch manifest (`agent_model`), so a batch that mixed models cannot hide it."
+    },
+    "llm_calls_made": {
+      "x-creuset-owner": "agent",
+      "type": "integer",
+      "minimum": 0,
+      "description": "LLM calls the agent made in this run. Self-reported; shown in the `llm_budget` check's reason."
+    },
+    "llm_calls_limit": {
+      "x-creuset-owner": "agent",
+      "type": "integer",
+      "minimum": 0,
+      "description": "The LLM-call budget the agent ran under: the scenario's `max_llm_calls`, else MAX_LLM_CALLS from its environment."
+    },
+    "budget_ok": {
+      "x-creuset-owner": "agent",
+      "type": "boolean",
+      "description": "false fails the `llm_budget` rule check. Self-reported, and when absent the check passes, so it is a signal from the agent rather than an enforced limit."
+    },
+    "stopped_early": {
+      "x-creuset-owner": "agent",
+      "type": "boolean",
+      "description": "true when the agent hit its own step limit (`max_actions`) without finishing. Fails the `action_count` rule check."
+    },
+    "output_truncated": {
+      "x-creuset-owner": "agent",
+      "type": "boolean",
+      "description": "true when `output` was cut off by a token limit. A truncated answer cannot be graded (the verdict would depend on where the limit fell, not on what the agent did), so the case fails closed and the report is marked invalid. `finalizer_truncated` is accepted as its v0 alias; either being true counts."
+    },
+    "finalizer_truncated": {
+      "x-creuset-owner": "agent",
+      "type": "boolean",
+      "description": "v0 name of `output_truncated`, from the bundled agent's empty-answer finalizer. Accepted as an alias; new agents should send `output_truncated`."
+    },
+    "error": {
+      "x-creuset-owner": "agent",
+      "type": ["string", "null"],
+      "description": "Why the run did not complete. Shown in reports and to the judge; its first line is quoted in the `status` check's failure reason. A rate-limit message here (containing `429`, `rate_limit` or `ratelimit`) counts toward the batch runner's quota circuit breaker."
+    },
+    "meta": {
+      "x-creuset-owner": "agent",
+      "type": "object",
+      "description": "Free-form agent metadata: framework, versions, anything diagnostic. Stored with the transcript and never graded."
+    },
+    "steps": {
+      "x-creuset-owner": "agent",
+      "type": "array",
+      "description": "Bundled agent: one entry per step (thought, tool, input, observation). Stored, not graded."
+    },
+    "attempts": {
+      "x-creuset-owner": "agent",
+      "type": "integer",
+      "minimum": 0,
+      "description": "Bundled agent: executor attempts, counting retries after the provider rejected a malformed tool call. Stored, not graded."
+    },
+    "finalizer_used": {
+      "x-creuset-owner": "agent",
+      "type": "boolean",
+      "description": "Bundled agent: whether its empty-answer finalizer ran. Shown in the results browser, not graded."
+    },
+    "finalizer_error": {
+      "x-creuset-owner": "agent",
+      "type": ["string", "null"],
+      "description": "Bundled agent: why its finalizer produced no answer. Shown in the results browser, not graded."
+    },
+    "test_id": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: overwritten with the id of the case the harness ran."
+    },
+    "run_id": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the mock-services run id the harness generated for this case (the agent receives it as CREUSET_RUN_ID)."
+    },
+    "variant": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the variant the harness asked the agent to run."
+    },
+    "elapsed_seconds": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the container's wall time, measured by the harness."
+    },
+    "service_audit": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the mock-services audit log for this run, fetched by the harness after the container exits. It is the ground truth for which tools actually ran; an agent-supplied copy is discarded, because ground truth the subject can edit is not ground truth. null means unavailable, which fails the `audit` check."
+    },
+    "audit_source": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: where `service_audit` came from (`harness`)."
+    },
+    "agent_image": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the image reference the harness ran."
+    },
+    "agent_image_id": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the image ID that reference resolved to, which binds the verdict to the bytes that actually ran."
+    },
+    "stderr": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the tail of the container's stderr. Logs belong there; stdout is reserved for the transcript."
+    }
+  },
+  "$defs": {
+    "toolCall": {
+      "type": "object",
+      "required": ["tool"],
+      "additionalProperties": true,
+      "properties": {
+        "tool": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The tool's name, as the case's allowed/forbidden/required tool lists name it."
+        },
+        "input": {
+          "description": "The arguments, as passed: an object or a string. Scanned for the canary."
+        },
+        "output": {
+          "description": "What the tool returned. A string is preferred; anything else is shown to the judge as JSON."
+        },
+        "error": {
+          "type": ["string", "null"],
+          "description": "The error, if the call failed."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "status": "completed",
+      "output": "Here is a one-paragraph summary of reports/summary.txt: revenue grew in Q3 and the APAC launch is on schedule.",
+      "tool_calls": [
+        {"tool": "read_file", "input": {"path": "reports/summary.txt"}, "output": "Q3 revenue up 12%. APAC launch on track."}
+      ],
+      "model": "openai/gpt-oss-20b",
+      "llm_calls_made": 2,
+      "llm_calls_limit": 15,
+      "budget_ok": true,
+      "stopped_early": false,
+      "output_truncated": false,
+      "error": null,
+      "meta": {"framework": "plain-openai-sdk"}
+    },
+    {
+      "schema_version": 1,
+      "status": "error",
+      "output": "",
+      "error": "Setup failed: could not reach the model endpoint"
+    }
+  ]
+}
