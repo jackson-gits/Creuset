@@ -26,3 +26,7 @@ and the quick start.
   changes, commit style.
 - [SECURITY.md](../SECURITY.md): reporting a vulnerability in Creuset itself.
 - [CHANGELOG.md](../CHANGELOG.md)
+- [Development log](development-log.md): how the project got here, session by
+  session, including the mistakes and how each was found.
+- [CLAUDE.md](../CLAUDE.md): working notes. The architecture, the facts that
+  are easy to get wrong, what is load-bearing, and what is still open.
