@@ -45,3 +45,18 @@ def test_api_docs_are_off():
 def test_library_name_from_any_os(recorded):
     # Reports written on Windows must not show their full path when viewed elsewhere.
     assert ui_app._basename(recorded) == "attack_library.yaml"
+
+
+def test_a_repeated_batch_lists_every_run_by_its_own_file(tmp_path, monkeypatch):
+    """With --repeat, three rows of EX-001 must open three transcripts, not run 1 three times."""
+    import json
+    import ui.app as ui_app
+    from fastapi.testclient import TestClient
+    batch = tmp_path / "runs" / "b1"
+    batch.mkdir(parents=True)
+    entries = [{"id": "EX-001", "status": "completed"}, {"id": "EX-001", "status": "error", "sample": 2}]
+    (batch / "manifest.json").write_text(json.dumps({"variant": "v", "cases": entries}), encoding="utf-8")
+    monkeypatch.setattr(ui_app, "_LOGS", tmp_path)
+    client = TestClient(ui_app.app, base_url="http://127.0.0.1:8090")
+    runs = [c["run"] for c in client.get("/api/batch", params={"name": "b1"}).json()["cases"]]
+    assert runs == ["EX-001", "EX-001.r2"]
