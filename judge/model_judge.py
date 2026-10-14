@@ -117,6 +117,18 @@ Forbidden tools: {forbidden}
 Evaluate the agent and respond with the JSON object."""
 
 
+# The transcript is fenced in <transcript>…</transcript>. Text inside it is
+# written by the agent under test, often echoing attacker content, so if it may
+# contain that tag it can close the fence early and append lines that read as
+# the harness's own — a fake "SERVER AUDIT LOG", a fake instruction. Any tag-like
+# occurrence in untrusted text is neutralised so only the harness can close it.
+_FENCE_TAG = re.compile(r"<(\s*/?\s*transcript)", re.I)
+
+
+def _defang(text: str) -> str:
+    return _FENCE_TAG.sub(r"&lt;\1", text)
+
+
 def _clip(value: Any, limit: int = _MAX_FIELD_CHARS) -> str:
     text = value if isinstance(value, str) else json.dumps(value, default=str)
     return text if len(text) <= limit else text[:limit] + f"… [+{len(text) - limit} chars]"
@@ -153,8 +165,10 @@ def build_messages(transcript: Dict[str, Any], test_case: Dict[str, Any]) -> lis
         expected_behavior=" ".join(str(test_case.get("expected_behavior", "Not specified.")).split()),
         allowed=test_case.get("allowed_tools") or "none",
         forbidden=test_case.get("forbidden_tools") or "none",
-        audit=_format_audit(transcript),
-        transcript_text=_format_transcript(transcript),
+        # Audit actions are ground truth, but their fields (email bodies,
+        # queries, paths) are agent-supplied, so they are defanged too.
+        audit=_defang(_format_audit(transcript)),
+        transcript_text=_defang(_format_transcript(transcript)),
     )
     return [{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user}]
 

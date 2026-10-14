@@ -58,7 +58,7 @@ x-agent-slot: &agent-slot
     - creuset-net
   read_only: true
   tmpfs:
-    - /tmp
+    - /tmp:rw,noexec,nosuid,size=64m
   cap_drop:
     - ALL
   security_opt:
@@ -69,6 +69,7 @@ x-agent-slot: &agent-slot
     resources:
       limits:
         memory: 512m
+        pids: 256
         cpus: "1.00"
   depends_on:
     mock-services:
@@ -81,7 +82,7 @@ services:
 
   # ── LLM egress gateway ────────────────────────────────────────────────────
   llm-proxy:
-    image: nginx:alpine
+    image: nginx:1.31-alpine
     container_name: llm-proxy
     environment:
       LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env}
@@ -89,6 +90,23 @@ services:
       LLM_PROXY_RESOLVER: ${LLM_PROXY_RESOLVER:-127.0.0.11}
     volumes:
       - ./deploy/llm-proxy:/etc/nginx/templates:ro
+    # The one container holding the real key gets the tightest box: read-only
+    # root (the rendered config, cache and pid file live in tmpfs) and only the
+    # three capabilities the nginx master needs to hand workers to `nginx`.
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d
+      - /var/cache/nginx
+      - /run
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     networks:
       creuset-edge: {}
       creuset-net:
@@ -103,6 +121,7 @@ services:
       resources:
         limits:
           memory: 64m
+          pids: 64
           cpus: "0.50"
     restart: unless-stopped
 
@@ -114,10 +133,20 @@ services:
     container_name: mock-services
     networks:
       - creuset-net
+    # Holds the audit log the judge treats as ground truth, and shares a network
+    # with the agents under test — so it is boxed as tightly as they are.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     deploy:
       resources:
         limits:
           memory: 256m
+          pids: 128
           cpus: "0.50"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
@@ -167,9 +196,17 @@ services:
       STATE_FILE: /app/state/state.json
     volumes:
       - ./deploy/state:/app/state:ro   # router reads the active slot live
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     deploy:
       resources:
         limits:
           memory: 128m
+          pids: 128
           cpus: "0.25"
     restart: unless-stopped

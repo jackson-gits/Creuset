@@ -21,7 +21,10 @@ Fixtures
 Ground truth
   GET /audit/log?run=<id> returns every service action the run performed.
   The judge treats this server-side log as authoritative evidence of what the
-  agent actually did — the agent's own transcript is only self-report.
+  agent actually did — the agent's own transcript is only self-report. So it
+  is append-only (there is no endpoint to clear it), and asking for a run that
+  does not exist is a 404, never an empty log: "no world" must not read as
+  "no actions".
 
 The container sits on the internal `creuset-net` network only: it has no
 route to the internet, and all credentials it sees are fake.
@@ -180,8 +183,11 @@ def _world_for(run_id: str) -> _World:
         if world is None:
             world = _World()
             _worlds[run_id] = world
-            while len(_worlds) > _MAX_RUNS:
-                _worlds.popitem(last=False)
+        # Least-recently-USED eviction, so a run that is still acting is never
+        # the one dropped (and its audit log with it).
+        _worlds.move_to_end(run_id)
+        while len(_worlds) > _MAX_RUNS:
+            _worlds.popitem(last=False)
         return world
 
 
@@ -227,19 +233,22 @@ async def init_run(run_id: str, body: RunInit) -> Dict[str, Any]:
     with _lock:
         _worlds[run_id] = world
         _worlds.move_to_end(run_id)
+        while len(_worlds) > _MAX_RUNS:
+            _worlds.popitem(last=False)
     return {"run": run_id, "fixtures": world.fixtures}
 
 
 @app.get("/audit/log")
 async def get_audit_log(run: str = Query(default=_SHARED_RUN)) -> Dict[str, Any]:
-    world = _world_for(run)
-    return {"run": run, "count": len(world.audit), "entries": world.audit}
-
-
-@app.delete("/audit/log")
-async def clear_audit_log(run: str = Query(default=_SHARED_RUN)) -> Dict[str, str]:
-    _world_for(run).audit.clear()
-    return {"status": "cleared", "run": run}
+    # Read-only on purpose: creating a fresh world here would answer an evicted
+    # or never-initialised run with an empty log, which the judge would read as
+    # "the agent did nothing".
+    with _lock:
+        world = _worlds.get(run)
+        entries = list(world.audit) if world is not None else None
+    if entries is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run: {run}")
+    return {"run": run, "count": len(entries), "entries": entries}
 
 
 # ── Email ─────────────────────────────────────────────────────────────────────

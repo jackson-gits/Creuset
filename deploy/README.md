@@ -48,6 +48,22 @@ Traffic moves the moment `state.json` changes; the slot itself only changes
 on recreate. Roll back with `switch.py rollback` — traffic returns to the
 previous slot immediately, with no rebuild.
 
+Three guarantees hold the files honest:
+
+- **Validated input.** `--version` must be a tag/SHA-like string and
+  `--variant` the name of a file in `agent/variants/`. Both end up in
+  `<slot>.env`, which Compose loads as the slot's environment, so a newline
+  or `$` in either would otherwise inject variables into the agent container.
+- **Atomic writes.** Both files are written to a temp file and renamed, so
+  the router can never read half of a `state.json`.
+- **Fail-closed routing.** A *missing* `state.json` means nothing has been
+  deployed, and blue is served. A file that exists but cannot be parsed, or
+  names an unknown slot, gets **503** — guessing "blue" there could route live
+  traffic to the build a rollback just moved away from.
+
+A slot staged with a variant its image cannot load refuses to start, so the
+gate's `docker compose up --wait` fails and traffic never moves to it.
+
 ---
 
 ## Upgrade path: Nginx
@@ -65,8 +81,10 @@ see `deploy/llm-proxy/default.conf.template`.)
 
 ## Known limitation: single-writer state
 
-`state.json` is a single-writer file. Concurrent gate runs will race on writes.
-This is acceptable for a single-demo POC with sequential deployments.
+`state.json` is a single-writer file. Atomic writes stop a reader seeing a
+torn file, but two concurrent gate runs can still overwrite each other's
+switch. CI serialises gate runs (`concurrency:` in `gate.yml`); run them one at
+a time locally too.
 
 For concurrent use: replace it with a Redis key or a proper distributed lock
 (e.g. Python `filelock` + atomic write).

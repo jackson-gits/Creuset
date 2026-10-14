@@ -64,7 +64,7 @@ function renderSidebar() {
       <span class="row1">
         <span class="dot ${b.complete && b.completed === b.present ? "pass" : b.complete ? "warn" : "dim"}"></span>
         <span class="name">${esc(b.variant || "?")}</span>
-        <span class="badge dim">${b.completed}/${b.case_count ?? b.present}</span>
+        <span class="badge dim">${esc(b.completed)}/${esc(b.case_count ?? b.present)}</span>
       </span>
       <span class="row2">${esc(b.library || "")} · ${when(b.ts)}</span>
     </button>`;
@@ -125,7 +125,7 @@ function renderSummary() {
   const sev = (r, k) => {
     const s = r.severity[k];
     if (!s) return `<td style="color:var(--text-faint)">—</td>`;
-    return `<td class="mono" style="color:var(--${s.met ? "pass" : "fail"})">${s.passed}/${s.count}</td>`;
+    return `<td class="mono" style="color:var(--${s.met ? "pass" : "fail"})">${esc(s.passed)}/${esc(s.count)}</td>`;
   };
 
   const row = (r) => `
@@ -133,7 +133,7 @@ function renderSummary() {
       <td><b>${esc(r.variant || r.name)}</b></td>
       <td>${esc(r.library || "—")}</td>
       <td>${verdictBadge(r.gate_verdict)}</td>
-      <td class="mono">${r.detected}/${r.case_count}</td>
+      <td class="mono">${esc(r.detected)}/${esc(r.case_count)}</td>
       ${sev(r, "critical")}${sev(r, "high")}${sev(r, "medium")}
       <td>${validBadge(r.valid)}</td>
     </tr>`;
@@ -145,7 +145,7 @@ function renderSummary() {
     <tr class="clickable" data-open="${esc(r.path)}">
       <td><b>${esc(r.variant || r.name)}</b></td>
       <td>${esc(r.layer)}</td>
-      <td class="mono" style="color:var(--${r.detected ? "fail" : "pass"})">${r.detected}/${r.case_count}</td>
+      <td class="mono" style="color:var(--${r.detected ? "fail" : "pass"})">${esc(r.detected)}/${esc(r.case_count)}</td>
       <td>${validBadge(r.valid)}</td>
     </tr>`;
 
@@ -211,7 +211,7 @@ function renderReport(data) {
     if (!a || !a.count) return "";
     return `<div class="card ${a.met ? "met" : "missed"}">
       <div class="label">${k}</div>
-      <div class="value">${a.passed}/${a.count}</div>
+      <div class="value">${esc(a.passed)}/${esc(a.count)}</div>
       <div class="foot">threshold ${Math.round((a.threshold ?? 0) * 100)}% · ${a.met ? "met" : "missed"}</div>
     </div>`;
   }).join("");
@@ -224,7 +224,7 @@ function renderReport(data) {
         <td class="id">${esc(r.test_id)}</td>
         <td><span class="badge dim">${esc(r.severity)}</span></td>
         <td>${verdictBadge(r.rule_verdict)}</td>
-        <td>${verdictBadge(r.judge_verdict)}${r.judge_score ? ` <span class="mono" style="color:var(--text-faint)">${r.judge_score}</span>` : ""}</td>
+        <td>${verdictBadge(r.judge_verdict)}${r.judge_score ? ` <span class="mono" style="color:var(--text-faint)">${esc(r.judge_score)}</span>` : ""}</td>
         <td>${verdictBadge(r.final)}</td>
         <td class="why">${esc(why.slice(0, 150))}${why.length > 150 ? "…" : ""}</td>
       </tr>
@@ -248,7 +248,7 @@ function renderReport(data) {
 
     <div class="cards">
       <div class="card"><div class="label">Gate</div><div class="value" style="color:var(--${m.gate_verdict === "PASS" ? "pass" : "fail"})">${esc(m.gate_verdict)}</div>
-        <div class="foot">${m.detected}/${m.case_count} detected</div></div>
+        <div class="foot">${esc(m.detected)}/${esc(m.case_count)} detected</div></div>
       ${cards}
     </div>
 
@@ -295,7 +295,7 @@ function caseDetail(r, meta) {
     <ul class="checks">${checks || `<li style="color:var(--text-faint)">none recorded</li>`}</ul>
 
     ${r.judge_verdict && r.judge_verdict !== "SKIP" ? `
-      <h3>LLM judge — score ${r.judge_score ?? "—"}</h3>
+      <h3>LLM judge — score ${esc(r.judge_score ?? "—")}</h3>
       <div class="rationale">${esc(r.judge_rationale || "")}</div>` : ""}
 
     ${r.output_preview ? `<div class="preview-block">
@@ -340,7 +340,7 @@ function renderBatch(data) {
 
     <div class="cards">
       <div class="card"><div class="label">Completed</div>
-        <div class="value">${data.cases.filter((c) => c.status === "completed").length}/${m.case_count ?? data.cases.length}</div>
+        <div class="value">${data.cases.filter((c) => c.status === "completed").length}/${esc(m.case_count ?? data.cases.length)}</div>
         <div class="foot">${m.complete ? "batch finished" : "stopped early"}</div></div>
       <div class="card"><div class="label">Agent model</div>
         <div class="value" style="font-size:13px">${esc(models[0] || m.agent_model || "?")}</div>
@@ -353,7 +353,7 @@ function renderBatch(data) {
       ${esc(models.join(", "))} — its cases are not comparable with each other.</div>` : ""}
 
     ${m.complete === false ? `<div class="banner warn"><b>Incomplete batch.</b>
-      ${data.cases.length}/${m.case_count} case(s) ran. Finish it without re-running the rest:
+      ${data.cases.length}/${esc(m.case_count)} case(s) ran. Finish it without re-running the rest:
       <pre>python attacks/loader.py --resume logs/runs/${esc(data.batch)}</pre></div>` : ""}
 
     ${(m.resumes || []).map((r) => `<div class="banner warn">

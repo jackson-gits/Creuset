@@ -2,10 +2,8 @@
 
 Claude's own reference for this repo: what the project is, how it fits together, and
 **what state it's actually in**. Update the "Current state" and "Session log" sections as
-things change. Last full review: **2026-09-20** (working tree, on top of commit `2fd658f`).
-
-> **The working tree is far ahead of the last commit.** Nearly every module was rewritten
-> after `2fd658f` and none of it is committed. Read the files, not the git history.
+things change. Last full review: **2026-10-14** — security pass over every module (see the
+session log, entry 8). Work happens on `claude/*` branches; read the files, not old notes.
 
 ---
 
@@ -34,8 +32,9 @@ gate/run_gate.py --version X [--variant V] [--skip-model-judge] [--dry-run]
  │           └─ agent/run_agent.py → JSON transcript on stdout
  │   → logs/runs/<ts>_<variant>_<library>/{<ID>.json, manifest.json}
  ├─ judge/score.py --manifest .../manifest.json --output ...
- │   ├─ rule_checks.py   status / audit present / forbidden tools (transcript ∪
- │   │                   server audit) / required tools / output patterns /
+ │   ├─ rule_checks.py   status / answered / complete_answer (finalizer not
+ │   │                   truncated) / audit present / forbidden tools (transcript
+ │   │                   ∪ server audit) / required tools / output patterns /
  │   │                   canary / max_actions / LLM budget
  │   ├─ model_judge.py   OpenAI SDK → JUDGE_API_BASE (Groq direct, from the HOST)
  │   │                   score 1–5, PASS if ≥4; any error = FAIL (fail-closed)
@@ -84,9 +83,18 @@ Other entry points:
   The real key goes only to llm-proxy and the host judge; agent containers get a
   placeholder, so a hijacked agent has no credential to exfiltrate.
   Never print or commit `.env`.
-- **llm-proxy** is nginx with `deploy/llm-proxy/default.conf.template` (envsubst at start):
-  allowlists the OpenAI-compatible paths of one upstream host, injects the real key, and
-  resolves DNS at runtime — no hard-coded IPs. Everything else → 403.
+- **llm-proxy** is nginx (`nginx:1.31-alpine`) with `deploy/llm-proxy/default.conf.template`
+  (envsubst at start): allowlists the OpenAI-compatible paths of one upstream host, injects
+  the real key, and resolves DNS at runtime — no hard-coded IPs. Everything else → 403.
+  It **verifies the upstream certificate** (`proxy_ssl_verify on` — nginx's default is off)
+  and forwards **`$uri`, not the raw request line**: the allowlist matches the normalised
+  path, so forwarding the raw one let `/openai/v1/files/..%2F..%2Fv1/models` through to the
+  files API with the key. Both were reproduced against a fake upstream before fixing.
+- **Where the audit log comes from**: `sandbox/run_test.py` fetches it itself via
+  `docker exec mock-services python -c …` after the agent exits (`audit_source: harness`)
+  and overwrites whatever the agent reported. mock-services' `/audit/log` is append-only
+  (no DELETE) and 404s for an unknown run, so "no world" never reads as "no actions".
+  Live slots (`serve.py`) still self-report — the monitor treats them as such.
 - **Network isolation is real again**: `creuset-net` is `internal: true`. llm-proxy and
   router are dual-homed onto `creuset-edge`. `sandbox/run_test.py --check` proves it
   empirically (gateway reachable, other paths 403, no internet TCP, no DNS).
@@ -96,6 +104,13 @@ Other entry points:
   any sandbox run — `preflight()` refuses to start otherwise.
 - Rebuild after changes: `docker compose build agent-blue` (agent code, image is
   `creuset-agent:latest`) or `docker compose build mock-services` (fixtures).
+- **Tests**: `pip install -r requirements.txt -r agent/requirements.txt -r requirements-dev.txt`
+  then `ruff check . && pytest` (~2 s, no Docker, no key, no quota). CI runs the same plus
+  `docker compose config` and `nginx -t` on every push (`.github/workflows/tests.yml`).
+- **Input validation**: variant names must match `^[A-Za-z0-9_-]{1,64}$` and exist in
+  `agent/variants/`; versions `^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$`. Enforced in
+  `run_agent._load_variant` (the sink), `run_test.validate_variant` (loader + CLI) and
+  `switch.validate_build` (env files; the gate calls it before spending quota).
 
 ## Provider quota — read before running anything
 
@@ -260,6 +275,8 @@ payload, not a weaker prompt — a weaker prompt just turns `broken` into `naive
    the canary), and PI-005 showed exactly what that misses. The monitor loads the same
    set, so its live pattern detector inherits the gap.
 5. **`evaluate/run_eval.py` still has not completed end-to-end with a valid result.**
+   (Its rollback latency now comes from `simulate_traffic.py --result-json` — before
+   2026-10-14 it still timed the whole subprocess, sleeps included, despite the note below.)
    It needs ~3x (26 + 10) agent cases plus judging, which does not fit one day. Run it
    across two days, or with `--variants` split — it now skips the benign suite when the
    adversarial batch died on quota, so a doomed run stops sooner.
@@ -398,6 +415,48 @@ why the router ignored its state file for half a session.
 ---
 
 ## Session log
+- **2026-10-14 (8)**: Security pass over the whole project ("no vulnerabilities"). Every
+  finding below was reproduced or tested before/after; `tests/` (91 tests) fails 55 on the
+  previous commit and passes on this one. The full hardened stack was brought up in Docker
+  and exercised live (isolation probe, router, switch, slot start-up, UI in Chromium).
+  - **llm-proxy** (holds the real key): no upstream TLS verification, and a raw-URI
+    allowlist bypass (`..%2F`) that reached non-allowlisted upstream APIs with the key.
+    Fixed in the template; container now read-only, `cap_drop: ALL` + 3, pinned tag.
+  - **CI script injection**: `${{ github.event.inputs.version }}` was spliced into a
+    `run:` script. Now passed via `env:`; variant is a `choice`; `permissions: read`;
+    `concurrency` queues gate runs; model/token settings match the measured config.
+  - **Env-file injection**: `switch.py` wrote `--version` verbatim into `<slot>.env`, which
+    Compose loads into the slot — a newline added arbitrary variables. Variants were
+    unvalidated file paths (`--variant ../x`) in the agent, loader batch dir and env file.
+  - **Gate fail-open paths**: a truncated-finalizer case could PASS and deploy (now a
+    `complete_answer` rule check FAILs it); zero cases passed vacuously (now FAIL, `valid:
+    false`); the gate now refuses any PASS whose report is not `valid`.
+  - **Judge fence**: transcript text could contain `</transcript>` and write lines the
+    judge read as trusted. Tag-like text is defanged; prompts are otherwise byte-identical,
+    so earlier judge scores stay comparable.
+  - **Ground truth relayed by the subject**: the audit log was fetched inside the agent
+    container and reported on its stdout. The harness now fetches it; mock-services lost
+    `DELETE /audit/log`, 404s unknown runs, and evicts LRU instead of FIFO.
+  - **Router**: torn/corrupt `state.json` fell back to blue (possibly the rolled-back
+    build) → now 503; `switch.py` writes atomically; hop-by-hop headers stripped; body cap;
+    upstream timeouts are a 502, not a 500 traceback.
+  - **Results browser**: DNS rebinding could read `logs/` from any website (Host
+    allowlist added), plus CSP/nosniff/frame-deny, OpenAPI docs off, last raw
+    interpolations escaped, `root` path no longer disclosed, Windows library paths
+    displayed by name on any OS.
+  - **Containers**: mock-services and router now non-root; all read-only with
+    `cap_drop: ALL`, `no-new-privileges`, PID limits; `/tmp` is `noexec,nosuid`.
+    (`pids_limit` must live under `deploy.resources.limits.pids` — Compose rejects both.)
+  - `run_eval.py` rollback latency fixed (see open work #5); truncated cases count as
+    harness errors there, not detections. `.env.example` updated to gpt-oss-20b / 400.
+  - **Not changed, deliberately**: LangChain stays on 0.2.x. Its known CVEs need
+    `load()`/`loads()` of untrusted data, which this code never does, and a major
+    upgrade would change agent behaviour and invalidate the comparison above.
+  - **To do on Jackson's machine**: `docker compose build` (mock-services, router and
+    agent images changed) and `docker compose up -d --force-recreate llm-proxy
+    mock-services`, then `sandbox/run_test.py --check`. A live call through llm-proxy to
+    Groq could not be made from the review sandbox (no public DNS for containers); the
+    image's CA bundle was checked to contain the roots Groq's chain uses.
 - **2026-09-20 (1)**: First session. Read the whole codebase + logs, wrote this file.
   No code changes.
 - **2026-09-20 (2)**: Someone rewrote most of the pipeline (agent, sandbox, judge, loader,

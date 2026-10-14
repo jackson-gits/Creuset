@@ -1,0 +1,55 @@
+name: Tests
+
+# Fast, secret-free checks on every push and PR. Unlike gate.yml this needs no
+# LLM key and spends no provider quota: it tests the gate's own logic (fail-closed
+# paths, input validation, the judge fence, the router, the results browser) and
+# that the infrastructure config still parses.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r agent/requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest
+
+      - name: Attack library schema
+        run: python attacks/loader.py --dry-run
+
+      # Compose rejects some combinations (e.g. pids_limit beside
+      # deploy.resources.limits) only at `up` time; catch them here instead.
+      - name: Compose file is valid
+        env:
+          LLM_API_KEY: ci-placeholder
+          AGENT_MODEL: ci-placeholder
+        run: docker compose config --quiet
+
+      - name: llm-proxy nginx config is valid
+        run: |
+          docker run --rm \
+            -e LLM_API_KEY=ci-placeholder \
+            -e LLM_UPSTREAM_HOST=api.groq.com \
+            -e LLM_PROXY_RESOLVER=127.0.0.11 \
+            -v "$PWD/deploy/llm-proxy:/etc/nginx/templates:ro" \
+            nginx:1.31-alpine nginx -t

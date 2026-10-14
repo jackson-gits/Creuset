@@ -1,0 +1,4 @@
+# Test + lint tooling. The suite also imports the agent, so install all three:
+#   pip install -r requirements.txt -r agent/requirements.txt -r requirements-dev.txt
+pytest>=8.0
+ruff>=0.6

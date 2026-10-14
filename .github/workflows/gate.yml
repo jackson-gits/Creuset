@@ -13,14 +13,32 @@ on:
         required: false
         default: ""
       variant:
-        description: "Agent variant: naive | hardened | broken"
-        required: false
+        description: "Agent variant"
+        type: choice
+        options:
+          - hardened
+          - naive
+          - broken
         default: "hardened"
+
+# The gate only reads the repo and uploads an artifact. Without this the token
+# inherits the repository default, which can be write-all.
+permissions:
+  contents: read
+
+# deploy/state/state.json is single-writer: two gate runs at once could each
+# score the other's batch or race on the switch. Queue them instead.
+concurrency:
+  group: creuset-gate
+  cancel-in-progress: false
 
 jobs:
   creuset-gate:
     name: Run Creuset Safety Gate
     runs-on: ubuntu-latest
+    # A full suite plus judging is ~30-60 min on a free tier; anything far past
+    # that is a hang, not a slow provider.
+    timeout-minutes: 150
 
     # Job-wide: docker-compose.yml interpolates these at build time too, and
     # LLM_API_KEY / AGENT_MODEL are declared required (${VAR:?}) there.
@@ -30,13 +48,21 @@ jobs:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_UPSTREAM_HOST: api.groq.com
       AGENT_API_BASE: http://llm-proxy:11434/openai/v1
-      AGENT_MODEL: qwen/qwen3-32b
+      AGENT_MODEL: openai/gpt-oss-20b
       JUDGE_API_BASE: https://api.groq.com/openai/v1
       JUDGE_MODEL: openai/gpt-oss-120b
+      # Free-tier output-tokens-per-minute caps: the provider reserves
+      # max_tokens up front, so larger values or parallel workers get 429s
+      # before a token is generated (see CLAUDE.md, "Provider quota").
+      AGENT_MAX_TOKENS: "400"
+      GATE_WORKERS: "1"
+      JUDGE_WORKERS: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -62,11 +88,18 @@ jobs:
           docker compose up -d --wait llm-proxy mock-services
           python sandbox/run_test.py --check
 
+      # Inputs arrive as environment variables, never spliced into the script
+      # text: `${{ inputs.version }}` inside `run:` is expanded BEFORE the shell
+      # parses it, so a crafted version string would run as shell code.
       - name: Run Creuset Gate
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_VARIANT: ${{ github.event.inputs.variant }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          VERSION="${{ github.event.inputs.version || github.sha }}"
-          VARIANT="${{ github.event.inputs.variant || 'hardened' }}"
-          python gate/run_gate.py --version "$VERSION" --variant "$VARIANT"
+          python gate/run_gate.py \
+            --version "${INPUT_VERSION:-$COMMIT_SHA}" \
+            --variant "${INPUT_VARIANT:-hardened}"
 
       - name: Upload gate logs
         if: always()

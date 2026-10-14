@@ -28,15 +28,13 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
@@ -61,6 +59,9 @@ _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 _SCORE_SCRIPT = _ROOT / "judge" / "score.py"
 _LOADER_SCRIPT = _ROOT / "attacks" / "loader.py"
 _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"
+
+sys.path.insert(0, str(_ROOT / "deploy"))
+from switch import validate_build  # noqa: E402
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -126,7 +127,9 @@ def _run_scorer(manifest: Path, skip_model_judge: bool) -> Optional[Dict[str, An
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
     # score.py puts its own directory on sys.path, so it runs from anywhere.
-    result = subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
+    # Its exit code is 1 for an ordinary gate FAIL, so the report file — not the
+    # exit code — is what says whether scoring happened.
+    subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
 
     if not report_path.exists():
         console.print("[red]✗ Score report not written. Treating as gate FAIL.[/red]")
@@ -217,6 +220,15 @@ def main(
     _variant = variant or version
     start_ts = time.time()
 
+    # Checked before the suite, not after: switch.py would refuse a bad value
+    # anyway, but only once a 30-minute run had spent its quota.
+    problem = validate_build(version, _variant)
+    if problem:
+        record = _write_gate_record(version, _variant, None, "FAIL", "BLOCKED",
+                                    error=f"Rejected before running: {problem}")
+        console.print(f"[bold red]⛔ GATE BLOCKED[/bold red] — {problem}. Audit: {record}")
+        raise typer.Exit(code=2)
+
     console.print(
         Panel(
             f"[bold]Version:[/bold] {version}  [bold]Variant:[/bold] {_variant}  "
@@ -251,6 +263,15 @@ def main(
         raise typer.Exit(code=1)
 
     gate_verdict = score_report.get("gate_verdict", "FAIL")
+    note: Optional[str] = None
+    # A PASS is only deployable if it is also a measurement. Every cause of
+    # `valid: false` should already have failed its own case, but this is the
+    # last line before live traffic moves, so it does not rely on that.
+    if gate_verdict == "PASS" and score_report.get("valid") is not True:
+        console.print("[bold red]Score report passed but is not a valid measurement "
+                      "(valid != true) — treating as FAIL.[/bold red]")
+        gate_verdict = "FAIL"
+        note = "Score report passed but was not a valid measurement; blocked (fail-closed)."
     elapsed = round(time.time() - start_ts, 1)
 
     console.print(Rule("Gate Decision"))
@@ -277,7 +298,7 @@ def main(
         console.print(f"\n[bold red]⛔ GATE BLOCKED[/bold red] — version [cyan]{version}[/cyan] failed safety gate. Blue slot remains live.")
 
     # ── Audit record ──────────────────────────────────────────────────────────
-    record_path = _write_gate_record(version, _variant, score_report, gate_verdict, decision)
+    record_path = _write_gate_record(version, _variant, score_report, gate_verdict, decision, error=note)
     console.print(f"\n[bold]Audit record:[/bold] {record_path}")
 
     raise typer.Exit(code=0 if gate_verdict == "PASS" else 1)

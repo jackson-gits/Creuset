@@ -26,6 +26,8 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -49,6 +51,14 @@ _STATE_DIR = Path(__file__).parent / "state"
 _STATE_FILE = _STATE_DIR / "state.json"
 _LEGACY_STATE_FILE = Path(__file__).parent / "state.json"  # pre-state-dir layout
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
+_VARIANTS_DIR = _ROOT / "agent" / "variants"
+
+# Both values are written into deploy/state/<slot>.env, which Compose loads as
+# the slot container's environment. Unvalidated, a version of "v1\nPYTHONPATH=…"
+# would set arbitrary variables inside the agent, and "$X" would be interpolated
+# by Compose — so only a conservative tag/SHA alphabet is accepted.
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$")
+VARIANT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # `version`/`variant` describe the ACTIVE slot. `slots` records what each slot
 # runs independently, which is what makes an honest rollback possible: without
@@ -87,9 +97,45 @@ def _migrate(state: dict) -> dict:
     return state
 
 
+def validate_build(version: str, variant: Optional[str]) -> Optional[str]:
+    """Why (version, variant) cannot be staged, or None if it can."""
+    if not VERSION_RE.fullmatch(version or ""):
+        return (f"invalid version {version!r}: 1-128 chars of letters, digits and . _ + / -, "
+                f"starting with a letter or digit")
+    if variant is not None:
+        if not VARIANT_RE.fullmatch(variant):
+            return f"invalid variant {variant!r}: letters, digits, '-' and '_' only"
+        # Staging a variant the image cannot load would bring the slot up only
+        # to fail every request; refuse here instead.
+        if not (_VARIANTS_DIR / f"{variant}.txt").is_file():
+            return f"unknown variant {variant!r}: no agent/variants/{variant}.txt"
+    return None
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """
+    Write via a temp file and rename. The router re-reads state.json on every
+    request; a plain write_text can be observed half-written, and a router that
+    cannot parse the file must not guess which slot is live.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    # On Windows the rename fails while another process (Docker Desktop's file
+    # sharing, an editor) briefly holds the target open; that clears quickly.
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 9:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.05)
+
+
 def _write_state(state: dict) -> None:
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    _atomic_write(_STATE_FILE, json.dumps(state, indent=2))
 
 
 def _write_slot_env(slot: str, variant: Optional[str], version: str) -> None:
@@ -100,10 +146,17 @@ def _write_slot_env(slot: str, variant: Optional[str], version: str) -> None:
     """
     if not variant:
         return
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    (_STATE_DIR / f"{slot}.env").write_text(
-        f"AGENT_VARIANT={variant}\nAGENT_VERSION={version}\n", encoding="utf-8"
-    )
+    problem = validate_build(version, variant)
+    if problem:  # defence in depth: the commands check first, this is the sink
+        raise ValueError(problem)
+    _atomic_write(_STATE_DIR / f"{slot}.env", f"AGENT_VARIANT={variant}\nAGENT_VERSION={version}\n")
+
+
+def _require_valid(version: str, variant: Optional[str]) -> None:
+    problem = validate_build(version, variant)
+    if problem:
+        console.print(f"[red]Error:[/red] {problem}")
+        raise typer.Exit(code=1)
 
 
 def _log_switch(event: str, state: dict) -> None:
@@ -152,6 +205,7 @@ def prepare(
     if slot not in ("blue", "green"):
         console.print("[red]Error:[/red] slot must be 'blue' or 'green'.")
         raise typer.Exit(code=1)
+    _require_valid(version, variant)
     _write_slot_env(slot, variant, version)
     state = _read_state()
     state["slots"][slot] = {"version": version, "variant": variant}
@@ -169,6 +223,7 @@ def switch(
     if target not in ("blue", "green"):
         console.print("[red]Error:[/red] target must be 'blue' or 'green'.")
         raise typer.Exit(code=1)
+    _require_valid(version, variant)
 
     state = _read_state()
     previous = state["active"]

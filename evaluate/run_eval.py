@@ -29,7 +29,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -37,7 +36,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.rule import Rule
@@ -69,6 +67,18 @@ _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _harness_error(result: Dict[str, Any]) -> bool:
+    """
+    True when a case's verdict says nothing about the agent: it never completed,
+    the judge was unreachable, or its rescued answer was cut off by a token
+    limit. All three fail closed in the gate (correct for a security decision),
+    but here FAIL means "detected" — so counting them would turn infrastructure
+    trouble into a better-looking detection rate.
+    """
+    return (result.get("status") != "completed" or bool(result.get("judge_error"))
+            or bool(result.get("finalizer_truncated")))
+
 
 def _run_gate(variant: str, skip_model_judge: bool) -> Dict[str, Any]:
     """Run the gate for a variant. Returns gate record dict."""
@@ -153,8 +163,8 @@ def _run_false_positive_check(variant: str, skip_model_judge: bool) -> Dict[str,
     # failure, not the agent over-refusing. Counting those as false positives
     # would let a flaky run inflate the headline metric, so they are reported
     # separately and excluded from the rate.
-    errored = [r for r in results if r.get("status") != "completed" or r.get("judge_error")]
-    completed = [r for r in results if r.get("status") == "completed" and not r.get("judge_error")]
+    errored = [r for r in results if _harness_error(r)]
+    completed = [r for r in results if not _harness_error(r)]
     blocked = [r for r in completed if r.get("final") == "FAIL"]
     return {
         "total_benign": len(results),
@@ -168,10 +178,15 @@ def _run_false_positive_check(variant: str, skip_model_judge: bool) -> Dict[str,
     }
 
 
-def _measure_rollback_latency() -> float:
+def _measure_rollback_latency() -> Optional[float]:
     """
-    Measure time from anomaly injection to rollback completion using simulate_traffic.py.
-    Returns latency in seconds.
+    Seconds from the malicious entry being written to traffic actually moving,
+    as measured by monitor/simulate_traffic.py. None if no rollback happened.
+
+    Timing the whole subprocess instead (as this used to) mostly measures the
+    demo's own scaffolding: monitor start-up, the benign entries and their
+    sleeps. simulate_traffic.py subtracts from the injection instant, which is
+    the number that means something.
     """
     console.print(Rule("Rollback latency measurement"))
 
@@ -181,13 +196,17 @@ def _measure_rollback_latency() -> float:
         cwd=str(_ROOT), capture_output=True, text=True,
     )
 
-    start = time.time()
-    result = subprocess.run(
-        [sys.executable, str(_TRAFFIC_SIM), "--benign-count", "2", "--inject-attack"],
+    result_path = _LOGS_DIR / f"rollback_latency_{int(time.time())}.json"
+    subprocess.run(
+        [sys.executable, str(_TRAFFIC_SIM), "--benign-count", "2", "--inject-attack",
+         "--result-json", str(result_path)],
         cwd=str(_ROOT), capture_output=False, text=True, timeout=60,
     )
-    elapsed = round(time.time() - start, 2)
-    return elapsed
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return result.get("rollback_latency_seconds")
 
 
 def _compute_detection_rates(gate_record: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,8 +227,8 @@ def _compute_detection_rates(gate_record: Dict[str, Any]) -> Dict[str, Any]:
 
     # Same reasoning for a judge that could not be reached: it fails closed, so
     # its case would otherwise read as a detection.
-    errored = [r for r in results if r.get("status") != "completed" or r.get("judge_error")]
-    scored = [r for r in results if r.get("status") == "completed" and not r.get("judge_error")]
+    errored = [r for r in results if _harness_error(r)]
+    scored = [r for r in results if not _harness_error(r)]
 
     by_category: Dict[str, Dict[str, int]] = {}
     for r in scored:
@@ -284,7 +303,11 @@ def main(
     if measure_rollback:
         try:
             rollback_latency = _measure_rollback_latency()
-            console.print(f"[green]Rollback latency:[/green] {rollback_latency}s")
+            if rollback_latency is None:
+                console.print("[yellow]No rollback followed the injection — latency not measured.[/yellow]")
+            else:
+                console.print(f"[green]Rollback latency:[/green] {rollback_latency}s "
+                              f"[dim](injection → traffic moved)[/dim]")
         except Exception as e:
             console.print(f"[yellow]Rollback measurement failed: {e}[/yellow]")
 

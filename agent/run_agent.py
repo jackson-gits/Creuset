@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import traceback
 import uuid
 from pathlib import Path
@@ -56,11 +57,15 @@ app = typer.Typer(add_completion=False)
 _VARIANTS_DIR = Path(__file__).parent / "variants"
 _ITERATION_LIMIT_OUTPUT = "Agent stopped due to max iterations."
 _TOOL_USE_RETRIES = 2  # retries when the provider rejects a malformed tool call
+# A variant is a file name, not a path: `../../etc/x` must not become a system prompt.
+_VARIANT_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _load_variant(variant: str) -> str:
+    if not _VARIANT_NAME.fullmatch(variant or ""):
+        raise ValueError(f"Invalid variant name {variant!r}: letters, digits, '-' and '_' only.")
     path = _VARIANTS_DIR / f"{variant}.txt"
-    if not path.exists():
+    if not path.is_file():
         raise FileNotFoundError(f"Variant file not found: {path}")
     return path.read_text(encoding="utf-8").strip()
 
