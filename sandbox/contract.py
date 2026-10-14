@@ -11,7 +11,9 @@ on every case and no hint why. This module is the single source of truth, and
 schemas/transcript.v1.json is the same contract as JSON Schema.
 
   In        agent_scenario(case)       the case keys the agent may read, and
-                                       nothing the case is graded on
+                                       nothing the case is graded on, mounted
+                                       read-only at SCENARIO_MOUNT
+  Env       CONTRACT_ENV               the variables every agent container gets
   Out       parse_agent_stdout(stdout) one JSON transcript object on stdout;
                                        logs go to stderr
   Shape     validate_transcript(t)     checked against transcript.v1.json once
@@ -72,6 +74,30 @@ def agent_scenario(case: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: copy.deepcopy(case[key]) for key in AGENT_SCENARIO_KEYS if key in case}
 
 
+# Where agent_scenario() is mounted, read-only. The bundled agent is also told
+# with --scenario-file; any other image reads CREUSET_SCENARIO_FILE.
+SCENARIO_MOUNT = "/scenario.json"
+
+# Every agent container receives exactly these, plus the bundled agent's own
+# tuning knobs (sandbox/run_test.py _container_env; tests/test_sandbox.py checks
+# the two agree). Nothing else from the host environment crosses into the box.
+CONTRACT_ENV: Dict[str, str] = {
+    "CREUSET_CONTRACT_VERSION": "The transcript schema version this harness understands (1).",
+    "CREUSET_SCENARIO_FILE": f"Path of the scenario JSON ({SCENARIO_MOUNT}): id, input_payload, "
+                             "and optionally fixtures, max_actions, max_llm_calls.",
+    "CREUSET_RUN_ID": "This case's run id. Send it as the X-Creuset-Run header on mock-services "
+                      "calls, or use CREUSET_MOCK_URL, which already carries it.",
+    "CREUSET_VARIANT": "The variant label the harness was asked to run. Informational.",
+    "CREUSET_MOCK_URL": "Base URL of this run's mock world (http://mock-services:8001/r/<run id>). "
+                        "Point every tool at it: POST <url>/tools/<name> records any tool call and "
+                        "answers from the case's tool_responses.",
+    "OPENAI_BASE_URL": "The LLM gateway (llm-proxy). The name the OpenAI SDK reads by default.",
+    "OPENAI_API_BASE": "The same URL, under the name LangChain and older clients read.",
+    "OPENAI_API_KEY": "A placeholder. llm-proxy injects the real key, so the agent never holds it.",
+    "AGENT_MODEL": "The model to request from the gateway.",
+}
+
+
 # ── Transcript: what comes OUT of the container ───────────────────────────────
 
 # Set by the harness after the container exits, overwriting anything the agent
@@ -80,6 +106,7 @@ def agent_scenario(case: Mapping[str, Any]) -> Dict[str, Any]:
 HARNESS_OWNED_FIELDS: Tuple[str, ...] = (
     "test_id", "run_id", "variant", "elapsed_seconds", "service_audit",
     "audit_source", "agent_image", "agent_image_id", "stderr",
+    "exit_code", "world_fixtures", "reported_status", "contract_violations",
 )
 
 

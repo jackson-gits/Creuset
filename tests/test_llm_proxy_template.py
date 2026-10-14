@@ -126,8 +126,9 @@ def envsubst(template: str, env: dict[str, str]) -> str:
 
 
 def render(env: dict[str, str]) -> str:
-    # newline="": compare the bytes nginx would read, not a platform translation.
-    return envsubst(TEMPLATE.read_text(encoding="utf-8", newline=""), env)
+    # Decode the raw bytes: compare what nginx would read, not a platform newline
+    # translation. (read_text(newline="") says the same but needs Python 3.13.)
+    return envsubst(TEMPLATE.read_bytes().decode("utf-8"), env)
 
 
 # ── 1. The default render is the published config ───────────────────────────

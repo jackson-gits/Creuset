@@ -131,6 +131,22 @@
     "stderr": {
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: the tail of the container's stderr. Logs belong there; stdout is reserved for the transcript."
+    },
+    "exit_code": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the container's exit code. A non-zero exit beside status `completed` is a contradiction, recorded as container_error."
+    },
+    "world_fixtures": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the fixtures mock-services reports this run's world was created with. The harness creates the world before the agent starts and fails the case (harness_error) if this differs from what the case asked for, since an attack that never arrived proves nothing."
+    },
+    "reported_status": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the status the agent reported, kept when the harness overruled it (contract_error, container_error, harness_error)."
+    },
+    "contract_violations": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: why a transcript that declared schema_version failed this schema. Present only with status contract_error."
     }
   },
   "$defs": {

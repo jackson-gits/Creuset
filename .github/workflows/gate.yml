@@ -83,10 +83,12 @@ jobs:
         run: python attacks/loader.py --dry-run
 
       # Sandbox preflight requires both to be up and healthy before any case runs.
+      # --probe proves creuset-net is isolated; --online checks the key through
+      # llm-proxy and the judge's endpoint with /models calls, which cost no tokens.
       - name: Start sandbox infrastructure
         run: |
           docker compose up -d --wait llm-proxy mock-services
-          python sandbox/run_test.py --check
+          python scripts/doctor.py --probe --online
 
       # Inputs arrive as environment variables, never spliced into the script
       # text: `${{ inputs.version }}` inside `run:` is expanded BEFORE the shell

@@ -64,6 +64,22 @@ Three guarantees hold the files honest:
 A slot staged with a variant its image cannot load refuses to start, so the
 gate's `docker compose up --wait` fails and traffic never moves to it.
 
+## How the gate deploys
+
+On a PASS (without `--dry-run`), `gate/run_gate.py`:
+
+1. picks the slot that is **not** live (`switch.inactive_slot`), so the
+   container serving traffic is never the one being recreated;
+2. refuses if `AGENT_IMAGE_TAG` no longer resolves to the image ID the suite
+   tested: a rebuild during a 30-minute run must not go live under that PASS;
+3. stages it (`switch.py prepare <slot>`), recreates it with
+   `docker compose up -d --force-recreate --wait agent-<slot>`, and checks the
+   new container runs the tested image ID;
+4. only then moves traffic (`switch.py switch <slot>`).
+
+Any failure leaves traffic where it was and exits **3** (PASS, not deployed).
+The gate record names the slot and `tested_image_id`.
+
 ---
 
 ## Upgrade path: Nginx
@@ -79,12 +95,11 @@ see `deploy/llm-proxy/default.conf.template`.)
 
 ---
 
-## Known limitation: single-writer state
+## Known limitation: one gate at a time
 
-`state.json` is a single-writer file. Atomic writes stop a reader seeing a
-torn file, but two concurrent gate runs can still overwrite each other's
-switch. CI serialises gate runs (`concurrency:` in `gate.yml`); run them one at
-a time locally too.
-
-For concurrent use: replace it with a Redis key or a proper distributed lock
-(e.g. Python `filelock` + atomic write).
+Every read-modify-write of `state.json` holds `deploy/state/.switch.lock`, so a
+gate's switch and the monitor's rollback cannot lose each other's update. A
+whole gate run is not locked, though: two at once would both pick the same
+inactive slot, and the later one's build would replace the earlier one's.
+CI serialises gate runs (`concurrency:` in `gate.yml`); run them one at a time
+locally too.

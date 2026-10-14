@@ -1,0 +1,114 @@
+# Changelog
+
+All notable changes to Creuset. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+**Measurement-affecting** entries matter most here: they mark the commits
+across which published results stop being comparable (see
+[CONTRIBUTING.md](CONTRIBUTING.md#measurement-affecting-changes)). An entry
+that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
+
+## [Unreleased]
+
+### Measurement-affecting
+
+- **None changed.** The agent prompts and loop, every case's grading fields,
+  the mock world, the judge prompt and the default thresholds all keep the
+  fingerprints the published results ran under.
+- New surface fingerprinted: `agent/constraints.txt`. It pins the agent image's
+  dependencies to the exact versions inside the image that produced the
+  published results (LangChain 0.2.17, langchain-openai 0.1.25, openai 1.109.1,
+  Python 3.11.16). Before, `docker compose build` resolved whatever was newest
+  within the ranges, so a rebuild could change agent behaviour silently. A
+  rebuilt image was checked to contain exactly the measured versions.
+- New graded case field `tool_responses` (canned answers for generic tools) is
+  fingerprinted like the other grading fields. No bundled case uses it.
+
+### Added
+
+- **Bring your own agent.** `--agent-image` on `sandbox/run_test.py`,
+  `attacks/loader.py` and `gate/run_gate.py` (or `CREUSET_AGENT_IMAGE`) tests
+  any image that honours the agent contract, with `--variant` as its label.
+  The contract: `sandbox/contract.py`, `schemas/transcript.v1.json`, and the
+  `CREUSET_*` environment every agent container receives (`CONTRACT_ENV`).
+- `schemas/library.v1.json`: the test-library format as JSON Schema. A library
+  may declare its agent's own `tools`; cases may name only those, so a typo in
+  `forbidden_tools` is an error instead of an assertion that can never fail.
+  New optional case fields: `tool_responses`, `max_llm_calls`, `tags`,
+  `metadata`. Case IDs may be longer (`ORDERS-0042`).
+- `examples/scripted-agent/`: a deterministic agent (no model, no key) and a
+  library for it, exercising the whole contract.
+- `scripts/doctor.py`: checks the host, `.env`, Docker, Compose, the sandbox
+  network, container health, stale images and containers, and deploy state,
+  each with the command that fixes it. `--probe` proves isolation, `--online`
+  verifies both keys with `/models` calls (no tokens), `--json` for CI.
+- CI: a `sandbox-e2e` job runs the real Docker stack and the gate against the
+  example agent on every push, with no key and no quota.
+- `CREUSET_PREFIX`: run a second stack (containers, networks, project name)
+  beside the first.
+- `MOCK_STRICT_RUNS` is passed through by Compose.
+- Batch manifests (`manifest_version: 1`) and score reports
+  (`report_version: 1`) record the subject: kind, image and image ID. Reports
+  also record the thresholds they were judged against and list
+  `contract_errors`. Gate records add `tested_image_id`, `slot`, `library`.
+- `--library` on the gate and on `run_test.py`/`score.py` ad hoc modes.
+- Governance and contribution docs: Apache-2.0 `LICENSE` and `NOTICE`,
+  `SECURITY.md`, `CONTRIBUTING.md`, Code of Conduct, `CITATION.cff`, issue and
+  PR templates, pre-commit.
+- mock-services: generic recorded tools (`POST /tools/{name}`), run-scoped
+  URLs (`/r/{run}/...`), canned responses per run, opt-in strict runs.
+- llm-proxy provider profiles (scheme, port, path prefix, auth header, extra
+  CA, endpoint set), validated fail-closed at container start.
+- `scripts/update_baseline_lock.py` and its tests: the measurement guard.
+
+### Changed
+
+- **The harness creates each run's mock world itself**, with the case's
+  fixtures, before the agent starts; the bundled agent's own init is now a
+  harmless repeat. A world without the case's fixtures fails the case
+  (`harness_error`) instead of passing an attack that never arrived.
+- **The agent sees only the scenario**, never the answer key
+  (`expected_behavior`, `forbidden_tools`, patterns...).
+- Containers run by **image ID**, resolved once per case, and transcripts
+  record `agent_image`/`agent_image_id`. `--resume` refuses to finish a batch
+  after the image was rebuilt (`--allow-image-change` to override).
+- Transcripts are parsed by the contract: stdout logging no longer loses the
+  transcript, a v1 transcript that breaks its schema is a `contract_error`,
+  and a `completed` transcript from a container that exited non-zero is a
+  `container_error`. New harness-owned fields: `exit_code`, `world_fixtures`,
+  `reported_status`, `contract_violations`.
+- The gate refuses a misconfigured judge before running the suite (exit 2),
+  instead of failing every case closed after spending the agent quota.
+- Images: base pinned to `python:3.11.16-slim-trixie`, dependencies pinned
+  with constraints files, curl removed (healthchecks use Python), OCI labels,
+  `.dockerignore` keeps deploy state out of the router's build context.
+- Blue/green slots get the same environment as one-shot runs
+  (`FINALIZER_MAX_TOKENS`, `LLM_MAX_RETRIES`, `OPENAI_BASE_URL`) and the
+  `AGENT_IMAGE_TAG` the harness tests.
+- The isolation probe runs mock-services' image, so it works when the agent
+  under test is an image without Python.
+- `loader.py --cases` with an unknown ID exits 2, and an empty selection
+  exits 1, instead of running nothing and exiting 0.
+
+### Fixed
+
+- **The gate staged the green slot unconditionally**, so when green was live a
+  deploy recreated the container serving traffic. It now stages the inactive
+  slot.
+- **A gate PASS whose deploy failed exited 0**, so CI reported a deploy that
+  never happened. It now exits 3.
+- **The gate deployed by tag**: a rebuild during a run would have put untested
+  bytes live under a PASS. Traffic now moves only once the slot runs the
+  tested image ID.
+- `score.py` ignored a v1 agent's `output_truncated` when deciding `valid`, so
+  a truncated answer could leave a report claiming to be a measurement.
+- The library schema rejected `max_llm_calls`, a field the agent and the
+  baseline lock already used.
+- A unit test used `Path.read_text(newline=...)`, which needs Python 3.13.
+- Earlier on this branch (security pass, wave 1): llm-proxy upstream TLS
+  verification, a `..%2F` allowlist bypass and a trailing-newline bypass;
+  CI script injection; env-file injection through `--version`; fail-open gate
+  paths; the judge fence; ground truth relayed by the agent; an agent able to
+  re-initialise its world and wipe its own audit log; the judge's key reaching
+  `api.openai.com` when `JUDGE_API_BASE` was unset; DNS rebinding against the
+  results browser. See `SECURITY.md` and the git history for detail.

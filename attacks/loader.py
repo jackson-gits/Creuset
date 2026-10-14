@@ -23,6 +23,9 @@ Usage:
   python attacks/loader.py --resume logs/runs/<batch>
   python attacks/loader.py --resume logs/runs/<batch> --redo-empty
 
+  # Your own agent image and library (see sandbox/contract.py, schemas/library.v1.json)
+  python attacks/loader.py --library my_cases.yaml --agent-image my-agent:1.4 --variant v1.4
+
 Output (one folder per batch):
   logs/runs/<timestamp>_<variant>_<library>/
       <ID>.json          one transcript per case
@@ -33,13 +36,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import jsonschema
 import typer
 import yaml
 from dotenv import load_dotenv
@@ -58,74 +61,134 @@ for _stream in (sys.stdout, sys.stderr):
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 sys.path.insert(0, str(_ROOT / "sandbox"))
-from run_test import preflight, run_case, validate_variant  # noqa: E402
+from run_test import (  # noqa: E402
+    Subject, image_id, make_subject, preflight, run_case,
+)
 
 app = typer.Typer(add_completion=False)
 console = Console()
 
 DEFAULT_LIBRARY = _ROOT / "attacks" / "attack_library.yaml"
 RUNS_DIR = _ROOT / "logs" / "runs"
-_TOOLS = ["send_email", "delete_file", "charge_payment", "query_database", "read_file", "list_files"]
+LIBRARY_SCHEMA = _ROOT / "schemas" / "library.v1.json"
+MANIFEST_VERSION = 1
+# The tool inventory of a library that declares none: the bundled agent's tools.
+BUNDLED_TOOLS = ["send_email", "delete_file", "charge_payment", "query_database", "read_file", "list_files"]
+_TOOLS = BUNDLED_TOOLS  # pre-library-schema name, kept for anything importing it
+# Must equal the keys of _FIXTURES in sandbox/mock_services/main.py, which holds
+# the content (tests/test_loader.py checks the two agree).
 _FIXTURES = ["poisoned_db_record", "poisoned_filename", "base64_metadata", "cleanup_notice",
              "pipeline_maintenance"]
+# mock-services' own limit on one canned response; refused here rather than as
+# a 400 when the harness creates the world, mid-batch.
+_MAX_RESPONSE_BYTES = 64 * 1024
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
-_TOOL_LIST = {"type": "array", "items": {"enum": _TOOLS}}
-CASE_SCHEMA = {
-    "type": "object",
-    "required": ["id", "category", "severity", "scenario", "input_payload",
-                 "expected_behavior", "allowed_tools", "forbidden_tools",
-                 "forbidden_output_patterns"],
-    "properties": {
-        "id":                        {"type": "string", "pattern": "^[A-Z]{2}-\\d{3}$"},
-        "category":                  {"type": "string"},
-        "severity":                  {"enum": ["critical", "high", "medium"]},
-        "scenario":                  {"type": "string"},
-        "input_payload":             {"type": "string", "minLength": 1},
-        "expected_behavior":         {"type": "string"},
-        "allowed_tools":             _TOOL_LIST,
-        "forbidden_tools":           _TOOL_LIST,
-        "required_tools":            _TOOL_LIST,
-        "forbidden_output_patterns": {"type": "array", "items": {"type": "string"}},
-        "max_actions":               {"type": "integer", "minimum": 1},
-        "fixtures":                  {"type": "array", "items": {"enum": _FIXTURES}},
-        "probe":                     {"enum": ["judge"]},
-        "synthetic_transcript":      {"type": "object"},
-    },
-    "additionalProperties": False,
-}
+
+def _schema() -> Dict[str, Any]:
+    return json.loads(LIBRARY_SCHEMA.read_text(encoding="utf-8"))
+
+
+def load_library_doc(path: Path) -> Any:
+    """The library file as parsed: a list of cases, or {"cases": [...], "tools": [...], ...}."""
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def library_cases(raw: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw, list):
+        return raw
+    return (raw or {}).get("cases", []) if isinstance(raw, dict) else []
+
+
+def library_tools(raw: Any) -> List[str]:
+    """The tools a library's cases may name: its declared inventory, else the bundled six."""
+    declared = raw.get("tools") if isinstance(raw, dict) else None
+    return list(declared) if declared else list(BUNDLED_TOOLS)
 
 
 def load_library(path: Path) -> List[Dict[str, Any]]:
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-    return raw if isinstance(raw, list) else raw.get("cases", [])
+    return library_cases(load_library_doc(path))
 
 
-def validate(cases: List[Dict[str, Any]]) -> List[str]:
-    """Schema + semantic validation. Returns error strings (empty = valid)."""
-    import re
+def _schema_errors(validator: Any, instance: Any) -> List[str]:
+    errors = sorted(validator.iter_errors(instance), key=lambda e: [str(p) for p in e.absolute_path])
+    return [f"{e.json_path}: {e.message}" if e.absolute_path else e.message for e in errors]
+
+
+def validate_library(raw: Any) -> List[str]:
+    """
+    Validate a whole library document: its shape, its declared tool inventory,
+    then every case. Returns error strings (empty = valid).
+    """
+    from jsonschema import Draft202012Validator
+    schema = _schema()
+    if isinstance(raw, dict):
+        if not isinstance(raw.get("cases"), list):
+            return ["the library has no `cases` list"]
+        # The library's own fields, checked against the object form of the
+        # schema with `cases` left out: each case gets its own, named, errors.
+        header_schema = json.loads(json.dumps(schema["oneOf"][1]))
+        header_schema["required"].remove("cases")
+        header_schema["properties"].pop("cases")
+        header = {k: v for k, v in raw.items() if k != "cases"}
+        problems = _schema_errors(Draft202012Validator({"$defs": schema["$defs"], **header_schema}), header)
+        if problems:
+            return [f"library: {p}" for p in problems]
+    elif not isinstance(raw, list):
+        return ["a library is a list of cases, or an object with a `cases` list"]
+    return validate(library_cases(raw), library_tools(raw))
+
+
+def validate(cases: List[Dict[str, Any]], tools: Optional[List[str]] = None) -> List[str]:
+    """
+    Schema + semantic validation of `cases` against the tool inventory `tools`
+    (default: the bundled agent's). Returns error strings (empty = valid).
+    """
+    from jsonschema import Draft202012Validator
+    schema = _schema()
+    validator = Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/case"})
+    inventory = set(tools or BUNDLED_TOOLS)
     errors: List[str] = []
     seen = set()
     for case in cases:
-        cid = case.get("id", "?")
-        try:
-            jsonschema.validate(case, CASE_SCHEMA)
-        except jsonschema.ValidationError as e:
-            errors.append(f"{cid}: {e.message}")
+        cid = case.get("id", "?") if isinstance(case, dict) else "?"
+        problems = _schema_errors(validator, case)
+        if problems:
+            errors.extend(f"{cid}: {p}" for p in problems)
             continue
         if cid in seen:
             errors.append(f"{cid}: duplicate id")
         seen.add(cid)
+        # A misspelt tool in forbidden_tools is an assertion that can never fail:
+        # the agent never calls a tool that does not exist. So the name must be one
+        # the agent has.
+        for field in ("allowed_tools", "forbidden_tools", "required_tools"):
+            unknown = sorted(set(case.get(field, [])) - inventory)
+            if unknown:
+                errors.append(f"{cid}: {field} names {unknown}, not in the library's tools "
+                              f"{sorted(inventory)}")
         overlap = set(case["allowed_tools"]) & set(case["forbidden_tools"])
         if overlap:
             errors.append(f"{cid}: tools both allowed and forbidden: {sorted(overlap)}")
+        contradiction = set(case.get("required_tools", [])) & set(case["forbidden_tools"])
+        if contradiction:
+            errors.append(f"{cid}: tools both required and forbidden: {sorted(contradiction)}")
         for pat in case["forbidden_output_patterns"]:
             try:
                 re.compile(pat)
             except re.error as e:
                 errors.append(f"{cid}: invalid regex {pat!r}: {e}")
+        unknown_fixtures = sorted(set(case.get("fixtures", [])) - set(_FIXTURES))
+        if unknown_fixtures:
+            errors.append(f"{cid}: unknown fixtures {unknown_fixtures}; mock-services defines {_FIXTURES}")
+        for name, value in (case.get("tool_responses") or {}).items():
+            if name not in inventory:
+                errors.append(f"{cid}: tool_responses names {name!r}, not in the library's tools")
+            size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            if size > _MAX_RESPONSE_BYTES:
+                errors.append(f"{cid}: tool_responses[{name!r}] is {size} bytes; the limit is {_MAX_RESPONSE_BYTES}")
         if case.get("probe") == "judge" and "synthetic_transcript" not in case:
             errors.append(f"{cid}: judge probe needs synthetic_transcript")
     return errors
@@ -154,6 +217,21 @@ def _is_quota_error(transcript: Dict[str, Any]) -> bool:
     err = str(transcript.get("error") or "").lower()
     return "ratelimit" in err or "rate_limit" in err or "429" in err
 
+def _entry(case_id: str, transcript: Dict[str, Any], path: Path) -> Dict[str, Any]:
+    """One case's manifest entry, derived from its transcript."""
+    entry = {"id": case_id, "status": transcript.get("status"),
+             "transcript": str(path),
+             # Recorded per case so a resumed batch can never hide that some of
+             # its cases came from a different model...
+             "agent_model": transcript.get("model"),
+             "elapsed_seconds": transcript.get("elapsed_seconds")}
+    # ...or a different build. Absent from transcripts older than the field, and
+    # left out rather than null so reconciling an old batch is not all noise.
+    if transcript.get("agent_image_id"):
+        entry["agent_image_id"] = transcript["agent_image_id"]
+    return entry
+
+
 def _execute_cases(
     cases: List[Dict[str, Any]],
     variant: str,
@@ -161,6 +239,7 @@ def _execute_cases(
     workers: int,
     on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any], Path], None]],
     description: str,
+    subject: Optional[Subject] = None,
 ) -> List[Dict[str, Any]]:
     """
     Run `cases` in parallel sandbox containers, writing one transcript per case
@@ -179,7 +258,7 @@ def _execute_cases(
                   disable=not sys.stdout.isatty()) as progress:
         task = progress.add_task(description, total=len(cases))
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(run_case, case, variant): case for case in cases}
+            futures = {pool.submit(run_case, case, variant, subject): case for case in cases}
             consecutive_quota_errors = 0
             for fut in as_completed(futures):
                 case = futures[fut]
@@ -191,14 +270,10 @@ def _execute_cases(
                                   "service_audit": None, "output": ""}
                 path = batch_dir / f"{case['id']}.json"
                 path.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
-                entries.append({"id": case["id"], "status": transcript.get("status"),
-                                "transcript": str(path),
-                                # Recorded per case so a resumed batch can never hide
-                                # that some of its cases came from a different model.
-                                "agent_model": transcript.get("model"),
-                                "elapsed_seconds": transcript.get("elapsed_seconds")})
+                entries.append(_entry(case["id"], transcript, path))
                 ok = transcript.get("status") == "completed"
-                tools = sorted({t["tool"] for t in transcript.get("tool_calls", [])})
+                tools = sorted({str(t.get("tool")) for t in transcript.get("tool_calls") or []
+                                if isinstance(t, dict)})
                 progress.console.print(
                     f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {case['id']:<7} "
                     f"{transcript.get('status', '?'):<16} tools={tools}"
@@ -240,23 +315,31 @@ def run_suite(
     on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any], Path], None]] = None,
     label: str = "",
     selected_ids: Optional[List[str]] = None,
+    subject: Optional[Subject] = None,
 ) -> Path:
     """
     Run `cases` in parallel sandbox containers, save transcripts + manifest.
     `on_result(case, transcript, path)` is called as each case finishes (the gate
     uses it to start judging while other cases are still running).
+    `subject` defaults to the bundled agent at `variant`.
     Returns the manifest path.
     """
+    subject = subject or make_subject(variant)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     batch_dir = RUNS_DIR / f"{stamp}_{variant}_{library.stem}{('_' + label) if label else ''}"
     batch_dir.mkdir(parents=True, exist_ok=True)
+    started_image_id = image_id(subject.image)
 
     entries = _execute_cases(cases, variant, batch_dir, workers, on_result,
-                             f"[cyan]{variant}[/cyan] × {library.stem}")
+                             f"[cyan]{variant}[/cyan] × {library.stem}", subject)
 
     manifest = {
+        "manifest_version": MANIFEST_VERSION,
         "ts": int(time.time()),
         "variant": variant,
+        # What ran: the image ID binds every verdict in this batch to the bytes
+        # that produced it, so a rebuild cannot be resumed into the same batch.
+        "subject": {**subject.describe(), "image_id": started_image_id},
         "library": str(library.resolve()),
         "categories": categories,
         "selected_ids": selected_ids,  # ad-hoc subset: coverage applies to these only
@@ -322,17 +405,29 @@ def _reconcile_with_disk(batch_dir: Path, in_scope: List[Dict[str, Any]],
             transcript = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue  # unreadable: leave it to be re-run
-        entry = {
-            "id": cid,
-            "status": transcript.get("status"),
-            "transcript": str(path),
-            "agent_model": transcript.get("model"),
-            "elapsed_seconds": transcript.get("elapsed_seconds"),
-        }
+        entry = _entry(cid, transcript, path)
         if prior.get(cid) != entry:
             changed.append(cid)
             prior[cid] = entry
     return changed
+
+
+def _manifest_subject(manifest: Dict[str, Any]) -> Tuple[Subject, List[str]]:
+    """
+    The subject a batch ran, and every image ID recorded for it (empty if none
+    was). Manifests older than `subject` were always the bundled agent.
+    """
+    recorded = manifest.get("subject") or {}
+    variant = manifest.get("variant")
+    external = recorded.get("kind") == "external"
+    try:
+        subject = make_subject(variant, recorded.get("image") if external else None)
+    except ValueError as e:
+        raise ValueError(f"Manifest names an unusable subject: {e}") from e
+    ids = {e["agent_image_id"] for e in manifest.get("cases", []) if e.get("agent_image_id")}
+    if recorded.get("image_id"):
+        ids.add(recorded["image_id"])
+    return subject, sorted(ids)
 
 
 def resume_suite(
@@ -342,6 +437,7 @@ def resume_suite(
     redo_ids: Optional[List[str]] = None,
     allow_model_change: bool = False,
     on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any], Path], None]] = None,
+    allow_image_change: bool = False,
 ) -> Path:
     """
     Finish a batch that stopped early, re-running only the cases that need it.
@@ -362,9 +458,7 @@ def resume_suite(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     variant = manifest.get("variant")
-    problem = validate_variant(variant)
-    if problem:
-        raise ValueError(f"Manifest names an unusable variant: {problem}")
+    subject, previous_images = _manifest_subject(manifest)
     library = Path(manifest["library"])
     if not library.exists():
         raise FileNotFoundError(f"Library {library} named by the manifest no longer exists.")
@@ -379,6 +473,16 @@ def resume_suite(
             f"{current_model}. Resuming would mix two models inside one batch, which makes "
             f"its results incomparable. Set AGENT_MODEL back, or pass --allow-model-change "
             f"if you genuinely intend a mixed batch.")
+
+    # The same for the build. A rebuilt image (a pulled fix, an edited prompt)
+    # under the same tag is a different agent; its cases do not belong here.
+    current_image = image_id(subject.image)
+    if previous_images and previous_images != [current_image] and not allow_image_change:
+        raise ValueError(
+            f"This batch ran image {', '.join(previous_images)}, but {subject.image} is now "
+            f"{current_image or 'missing'}. Resuming would mix builds inside one batch. "
+            f"Restore that image, start a new batch, or pass --allow-image-change if you "
+            f"genuinely intend a mixed batch.")
 
     all_cases = load_library(library)
     in_scope = select_cases(all_cases, manifest.get("categories"), manifest.get("selected_ids"))
@@ -411,14 +515,15 @@ def resume_suite(
     for cid in sorted(reasons):
         console.print(f"  [yellow]↻[/yellow] {cid:<7} {reasons[cid]}")
 
-    problems = preflight()
+    problems = preflight(subject)
     if problems:
         for problem in problems:
             console.print(f"[red]✗[/red] {problem}")
         raise RuntimeError("Preflight failed; nothing was run.")
 
     new_entries = _execute_cases(todo, variant, batch_dir, workers, on_result,
-                                 f"[cyan]{variant}[/cyan] × {library.stem} [dim](resume)[/dim]")
+                                 f"[cyan]{variant}[/cyan] × {library.stem} [dim](resume)[/dim]",
+                                 subject)
 
     merged = {**prior, **{e["id"]: e for e in new_entries}}
     entries = sorted(merged.values(), key=lambda e: e["id"])
@@ -429,9 +534,15 @@ def resume_suite(
         "complete": len(entries) == len(in_scope),
         "cases": entries,
     })
+    # The batch-level image is the one it started with; a mixed batch shows in
+    # the per-case agent_image_id, which _summarise reports. A batch older than
+    # the field ran an image nobody recorded, so it stays unknown, not "current".
+    started_with = previous_images[0] if previous_images else (None if prior else current_image)
+    manifest["subject"] = {**subject.describe(), "image_id": started_with}
     manifest.setdefault("resumes", []).append({
         "ts": int(time.time()),
         "agent_model": current_model,
+        "agent_image_id": current_image,
         "reran": sorted(reasons),
         "reasons": reasons,
     })
@@ -453,6 +564,10 @@ def _summarise(manifest_path: Path) -> None:
 
     # One batch must mean one model, or its numbers cannot be compared. A resumed
     # batch records the model per case, so say plainly when they disagree.
+    images = sorted({e["agent_image_id"] for e in manifest["cases"] if e.get("agent_image_id")})
+    if len(images) > 1:
+        console.print(f"[bold red]⚠ This batch mixes agent images {images} — its cases are not "
+                      f"comparable with each other.[/bold red]")
     models = sorted({e.get("agent_model") for e in manifest["cases"] if e.get("agent_model")})
     if len(models) > 1:
         console.print(f"[bold red]⚠ This batch mixes agent models {models} — its cases are not "
@@ -471,7 +586,8 @@ def _summarise(manifest_path: Path) -> None:
 @app.command()
 def main(
     library: Path = typer.Option(DEFAULT_LIBRARY, help="Path to the test library YAML."),
-    variant: str = typer.Option("hardened", help="Agent variant: naive | hardened | broken"),
+    variant: str = typer.Option("hardened", help="Bundled agent: naive | hardened | broken. "
+                                                  "With --agent-image: any label."),
     category: Optional[List[str]] = typer.Option(None, help="Only these categories (repeatable)."),
     cases: Optional[str] = typer.Option(None, help="Comma-separated case IDs to run."),
     workers: int = typer.Option(int(os.getenv("GATE_WORKERS", "2")), help="Parallel sandbox containers."),
@@ -487,6 +603,12 @@ def main(
     allow_model_change: bool = typer.Option(False, "--allow-model-change",
                                             help="With --resume, allow finishing a batch under a different "
                                                  "AGENT_MODEL. Makes the batch internally incomparable."),
+    allow_image_change: bool = typer.Option(False, "--allow-image-change",
+                                            help="With --resume, allow finishing a batch after the agent image "
+                                                 "was rebuilt. Makes the batch internally incomparable."),
+    agent_image: Optional[str] = typer.Option(None, "--agent-image", envvar="CREUSET_AGENT_IMAGE",
+                                              help="Test this image instead of the bundled agent; --variant is "
+                                                   "then just its label (see sandbox/contract.py)."),
 ) -> None:
     """Validate the library and batch-run its cases through the sandbox."""
     if resume:
@@ -498,6 +620,7 @@ def main(
                 batch_dir, workers, redo_empty,
                 [c.strip() for c in redo.split(",")] if redo else None,
                 allow_model_change,
+                allow_image_change=allow_image_change,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             console.print(f"[red]✗ {e}[/red]")
@@ -505,10 +628,15 @@ def main(
         _summarise(manifest_path)
         raise typer.Exit(code=0)
 
-    all_cases = load_library(library)
+    try:
+        raw = load_library_doc(library)
+    except (OSError, yaml.YAMLError) as e:
+        console.print(f"[red]✗ Cannot read {library}: {e}[/red]")
+        raise typer.Exit(code=1)
+    all_cases = library_cases(raw)
     console.print(f"[bold]Loaded[/bold] {len(all_cases)} cases from [cyan]{library}[/cyan]")
 
-    errors = validate(all_cases)
+    errors = validate_library(raw)
     if errors:
         console.print("[red]Library validation errors:[/red]")
         for e in errors:
@@ -520,24 +648,32 @@ def main(
     if dry_run:
         raise typer.Exit(code=0)
 
-    problem = validate_variant(variant)
-    if problem:
-        console.print(f"[red]✗ {problem}[/red]")
+    try:
+        subject = make_subject(variant, agent_image)
+    except ValueError as e:
+        console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(code=2)
 
     ids = [c.strip() for c in cases.split(",")] if cases else None
+    # A misspelt id used to be dropped silently, so `--cases PI-01` ran nothing
+    # and exited 0, which a script reads as success.
+    unknown = sorted(set(ids or []) - {c.get("id") for c in all_cases})
+    if unknown:
+        console.print(f"[red]✗ --cases names {unknown}, which {library.name} does not contain.[/red]")
+        raise typer.Exit(code=2)
     selected = select_cases(all_cases, category, ids)
     if not selected:
-        console.print("[yellow]No cases selected.[/yellow]")
-        raise typer.Exit(code=0)
+        console.print("[red]✗ No cases selected: nothing to run.[/red]")
+        raise typer.Exit(code=1)
 
-    problems = preflight()
+    problems = preflight(subject)
     if problems:
         for p in problems:
             console.print(f"[red]✗[/red] {p}")
         raise typer.Exit(code=2)
 
-    manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids)
+    manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
+                              subject=subject)
     _summarise(manifest_path)
 
 

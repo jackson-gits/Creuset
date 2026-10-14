@@ -170,7 +170,7 @@ The CLI is unchanged and remains the interface for CI (`.github/workflows/gate.y
 
 ### 1. Clone and configure
 ```bash
-git clone <repo>
+git clone https://github.com/jackson-gits/Creuset.git
 cd Creuset
 cp .env.example .env
 ```
@@ -183,7 +183,7 @@ LLM_UPSTREAM_HOST=api.groq.com
 
 # Agent: runs in the sandbox, reaches the LLM only through llm-proxy
 AGENT_API_BASE=http://llm-proxy:11434/openai/v1
-AGENT_MODEL=qwen/qwen3-32b
+AGENT_MODEL=openai/gpt-oss-20b
 
 # Judge: runs on the HOST, so it calls the provider directly
 JUDGE_API_BASE=https://api.groq.com/openai/v1
@@ -219,12 +219,12 @@ docker compose up -d llm-proxy mock-services
 
 Both must be **healthy** before any test runs — the sandbox preflight refuses to start otherwise.
 
-### 4. Verify the sandbox is actually isolated
+### 4. Check the machine, and prove the sandbox is isolated
 ```bash
-python sandbox/run_test.py --check
+python scripts/doctor.py --probe            # add --online to verify the keys
 ```
 
-This runs a probe container on the sandbox network and empirically confirms: the LLM gateway is reachable, every other path through it returns 403, mock-services is reachable, and the internet is **not** — no TCP, no DNS. It prints `✓ Sandbox isolated` or tells you what leaked.
+The doctor checks Python, dependencies, `.env` (never printing a secret), Docker and Compose versions, that `creuset-net` is internal, that `llm-proxy` and `mock-services` are healthy, and that no image or container is older than the code it should be running. Every problem comes with the command that fixes it. `--probe` runs a container on the sandbox network and confirms empirically that the LLM gateway is reachable, every other path through it returns 403, mock-services is reachable, and the internet is **not** — no TCP, no DNS. `--online` lists models through `llm-proxy` and at the judge's endpoint: it proves both keys work and costs no tokens. (`python sandbox/run_test.py --check` runs the probe alone.)
 
 ### 5. Validate the attack library
 ```bash
@@ -245,6 +245,15 @@ python gate/run_gate.py --version hardened --variant hardened --dry-run
 
 Drop `--dry-run` to let a passing run actually deploy. Add `--skip-model-judge` to run rule checks only (no judge cost).
 
+A deploy stages the build in whichever slot is **not** live, checks that the recreated slot runs the exact image ID the suite tested (a rebuild mid-run is refused, not deployed), and only then moves traffic. The exit code is stable, for CI:
+
+| Exit | Meaning |
+|---|---|
+| 0 | PASS: deployed, or would deploy (`--dry-run`) |
+| 1 | FAIL: blocked by the gate, or the suite or scorer failed (fail-closed) |
+| 2 | Rejected before anything ran: bad version/variant/image/library, or a misconfigured judge |
+| 3 | PASS, but the deploy did not complete: the gated build is **not** live |
+
 ### 8. Blue-green and the monitor
 ```bash
 docker compose up -d                    # + agent-blue, agent-green, router
@@ -263,6 +272,27 @@ python evaluate/run_eval.py
 ```
 
 Runs the gate for all three variants, the benign suite for each, and the rollback measurement, then writes `logs/eval_results_<ts>.json` and `logs/eval_summary_<ts>.md`. **Read the quota section first** — a complete run does not fit inside one model's daily free-tier budget.
+
+---
+
+## Testing your own agent
+
+The bundled LangChain agent is one subject; any container that honours the agent contract is another. The contract is short and written down in [`sandbox/contract.py`](sandbox/contract.py) and [`schemas/transcript.v1.json`](schemas/transcript.v1.json):
+
+- **In:** the scenario at `$CREUSET_SCENARIO_FILE` (the user message, never the answer key), an OpenAI-compatible LLM endpoint at `$OPENAI_BASE_URL` with a placeholder key (the real one stays in `llm-proxy`), and this run's mock world at `$CREUSET_MOCK_URL`.
+- **Tools:** point them at `POST $CREUSET_MOCK_URL/tools/<name>`. Every call is recorded server-side, which is the ground truth the judge trusts over your agent's own report, and answered from the case's `tool_responses` — which is also how a case plants an injection in your tool's output.
+- **Out:** one JSON transcript on stdout (`schema_version`, `status`, `output`, `tool_calls`), logs on stderr.
+
+[`examples/scripted-agent/`](examples/scripted-agent/) is a complete, deterministic example: no model and no key, so it runs anywhere, and CI runs it end to end on every push. Its library declares the agent's own tools ([`schemas/library.v1.json`](schemas/library.v1.json)):
+
+```bash
+docker build -t my-agent examples/scripted-agent
+python attacks/loader.py --dry-run --library examples/scripted-agent/cases.yaml
+python gate/run_gate.py --version 0.1.0 --variant careful --agent-image my-agent     --library examples/scripted-agent/cases.yaml --skip-model-judge --dry-run    # exit 0
+python gate/run_gate.py --version 0.1.0 --variant naive --agent-image my-agent     --library examples/scripted-agent/cases.yaml --skip-model-judge --dry-run    # exit 1
+```
+
+Every batch and report records the image ID it tested, and `--resume` refuses to finish a batch with a rebuilt image. The gate gives a verdict on any image; deploying one to the blue/green slots is supported for the bundled agent only, so `--agent-image` requires `--dry-run`.
 
 ---
 
@@ -313,7 +343,7 @@ The gate is only as trustworthy as its own plumbing, so each trust boundary is e
 
 | Boundary | Enforcement |
 |---|---|
-| Agent → internet | `creuset-net` is `internal: true`; the isolation probe (`run_test.py --check`) proves no TCP and no DNS out |
+| Agent → internet | `creuset-net` is `internal: true`; the isolation probe (`doctor.py --probe`, or `run_test.py --check`) proves no TCP and no DNS out |
 | Agent → LLM API | `llm-proxy` allowlists two endpoints, forwards only the **normalised** path (a `..%2F` path cannot reach other APIs), injects the real key, and **verifies the upstream TLS certificate** |
 | Agent → real key | Agents hold a placeholder; only `llm-proxy` and the host judge see `LLM_API_KEY` |
 | Agent → evidence | The harness, not the agent, fetches the audit log; the log is append-only and an unknown run is a 404, never an empty log |
@@ -340,7 +370,13 @@ creuset/
 │   └── variants/           naive / hardened / broken system prompts
 ├── sandbox/
 │   ├── run_test.py         Per-case container harness, preflight, isolation probe
+│   ├── contract.py         The agent contract: what goes in, what comes out, who owns it
 │   └── mock_services/      Fake REST API, per-run worlds, server-side audit log
+├── schemas/                transcript.v1.json, library.v1.json (JSON Schema)
+├── examples/scripted-agent Deterministic contract example (no model, no key)
+├── scripts/
+│   ├── doctor.py           Is this machine ready? Says how to fix what is not
+│   └── update_baseline_lock.py  Fingerprints of every measurement-affecting surface
 ├── attacks/
 │   ├── attack_library.yaml 26 adversarial cases + 1 judge probe
 │   ├── benign_tasks.yaml   10 legitimate tasks (false-positive measurement)

@@ -1,4 +1,12 @@
-FROM python:3.11-slim
+# The bundled agent under test. Its base image and dependency versions are
+# pinned to the build that produced the published results (see
+# constraints.txt): both are measurement-affecting.
+FROM python:3.11.16-slim-trixie
+
+LABEL org.opencontainers.image.title="creuset-agent" \
+      org.opencontainers.image.description="Creuset's bundled LangChain agent (naive / hardened / broken variants)" \
+      org.opencontainers.image.source="https://github.com/jackson-gits/Creuset" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -7,13 +15,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# curl is only used by the HEALTHCHECK in service (blue/green slot) mode
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Dependencies first (layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencies first (layer caching). No apt packages: the healthcheck uses the
+# image's own Python, so there is no curl in a container that runs hijackable code.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 COPY . .
 
@@ -27,7 +32,7 @@ USER agent
 #   uvicorn serve:app --host 0.0.0.0 --port 8000
 # The sandbox harness disables this check (--no-healthcheck) for one-shot runs.
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
 
 # Default: one-shot scenario mode (the harness passes --scenario-file ...).
 ENTRYPOINT ["python", "run_agent.py"]

@@ -50,3 +50,29 @@ def test_clean_rule_only_report_is_valid_pass():
                           skip_model_judge=True)
     assert report["gate_verdict"] == "PASS"
     assert report["valid"] is True
+
+
+def test_a_v1_truncated_answer_invalidates_the_report_too():
+    """score.py used to check only the bundled agent's v0 name for this flag."""
+    r = score_case(transcript(output_truncated=True), case(), skip_model_judge=True)
+    assert r["final"] == "FAIL" and r["finalizer_truncated"] is True
+    report = build_report([r], [], {"variant": "v1", "library": "x", "complete": True},
+                          skip_model_judge=True)
+    assert report["valid"] is False and report["truncated_finalizer"] == ["PI-001"]
+
+
+def test_contract_errors_are_listed_and_unmeasured():
+    r = score_case(transcript(status="contract_error"), case(), skip_model_judge=True)
+    report = build_report([r], [], {"variant": "v1", "library": "x", "complete": True},
+                          skip_model_judge=True)
+    assert report["contract_errors"] == ["PI-001"] and report["valid"] is False
+
+
+def test_report_records_what_was_tested_and_against_what():
+    r = score_case(transcript(), case(), skip_model_judge=True)
+    subject = {"kind": "external", "image": "my-agent:1.4", "variant": "v1", "image_id": "sha256:x"}
+    report = build_report([r], [], {"variant": "v1", "library": "x", "complete": True,
+                                    "subject": subject}, skip_model_judge=True)
+    assert report["report_version"] == 1
+    assert report["subject"] == subject
+    assert set(report["thresholds"]) == {"critical", "high", "medium"}
