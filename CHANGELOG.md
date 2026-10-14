@@ -26,6 +26,12 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **Argument-level policies**: `forbidden_calls` and `required_calls` rules
+  name a tool and conditions on its arguments (`issue_refund` with `amount` over
+  100, `send_email` to an address outside the company, a query matching
+  `DROP`). Checked against the server audit by a new `call_policy` rule check;
+  a missing or undecidable argument cannot clear a forbidden call, nor prove a
+  required one. Cases without rules get exactly the checks they had.
 - **Claude agents.** llm-proxy can allow Anthropic's Messages API
   (`LLM_ALLOWED_ENDPOINTS=messages|models`, key in `x-api-key`), and every agent
   container gets `ANTHROPIC_BASE_URL` and a placeholder `ANTHROPIC_API_KEY`, so

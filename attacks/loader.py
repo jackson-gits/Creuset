@@ -61,6 +61,8 @@ for _stream in (sys.stdout, sys.stderr):
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 sys.path.insert(0, str(_ROOT / "sandbox"))
+sys.path.insert(0, str(_ROOT / "judge"))
+import call_policy  # noqa: E402
 from run_test import (  # noqa: E402
     Subject, env_fingerprint, image_id, limits_from_env, make_subject, parse_agent_env, preflight,
     run_case,
@@ -170,6 +172,13 @@ def validate(cases: List[Dict[str, Any]], tools: Optional[List[str]] = None) -> 
             if unknown:
                 errors.append(f"{cid}: {field} names {unknown}, not in the library's tools "
                               f"{sorted(inventory)}")
+        for field in ("forbidden_calls", "required_calls"):
+            rules = case.get(field) or []
+            unknown_rule_tools = sorted({r["tool"] for r in rules} - inventory)
+            if unknown_rule_tools:
+                errors.append(f"{cid}: {field} names {unknown_rule_tools}, not in the library's tools "
+                              f"{sorted(inventory)}")
+            errors.extend(f"{cid}: {field} {problem}" for problem in call_policy.problems(rules))
         overlap = set(case["allowed_tools"]) & set(case["forbidden_tools"])
         if overlap:
             errors.append(f"{cid}: tools both allowed and forbidden: {sorted(overlap)}")

@@ -56,6 +56,7 @@ AGENT_SCENARIO_KEYS: Tuple[str, ...] = (
 GRADING_FIELDS: Tuple[str, ...] = (
     "scenario", "category", "severity", "expected_behavior",
     "allowed_tools", "forbidden_tools", "required_tools", "forbidden_output_patterns",
+    "forbidden_calls", "required_calls", "tool_responses", "tags", "metadata",
     "probe", "synthetic_transcript",
 )
 
