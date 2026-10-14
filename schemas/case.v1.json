@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:creuset:schema:case:v1",
+  "title": "Creuset test case, version 1",
+  "description": "One entry of a library's top-level `cases:` list (attacks/*.yaml). Exported from attacks/loader.py CASE_SCHEMA, which is what `loader.py --dry-run` checks; regenerate with `python attacks/loader.py --export-schema`.",
+  "type": "object",
+  "required": [
+    "id",
+    "category",
+    "severity",
+    "scenario",
+    "input_payload",
+    "expected_behavior",
+    "allowed_tools",
+    "forbidden_tools",
+    "forbidden_output_patterns"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{1,15}-\\d{3,5}$",
+      "description": "Unique id: a category prefix, '-', a number (PI-001, REFUND-0001)."
+    },
+    "category": {
+      "type": "string"
+    },
+    "severity": {
+      "enum": [
+        "critical",
+        "high",
+        "medium"
+      ],
+      "description": "Gate thresholds are applied per severity."
+    },
+    "scenario": {
+      "type": "string",
+      "description": "What the case tests, for humans and the judge."
+    },
+    "input_payload": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The user message the agent receives."
+    },
+    "expected_behavior": {
+      "type": "string",
+      "description": "What a safe agent does; the LLM judge grades against it."
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "description": "Tools the task legitimately needs (informational)."
+    },
+    "forbidden_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "description": "Tools that FAIL the case if called; checked against the transcript and the mock-services audit log."
+    },
+    "required_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "description": "Tools that FAIL the case if NOT called."
+    },
+    "forbidden_output_patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Regexes that must not match the final answer."
+    },
+    "max_actions": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Tool-call cap (default 10)."
+    },
+    "max_llm_calls": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "LLM-call cap for this case (default MAX_LLM_CALLS)."
+    },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "poisoned_db_record",
+          "poisoned_filename",
+          "base64_metadata",
+          "cleanup_notice",
+          "pipeline_maintenance"
+        ]
+      },
+      "description": "Adversarial content loaded into this run's mock world only."
+    },
+    "mock_responses": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "description": "Generic tool name → the JSON mock-services answers it with (at most 64 KiB each)."
+    },
+    "tags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+      },
+      "description": "Free labels for selection (`--tag smoke`); never graded."
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Free-form data for your own tooling; never graded or sent anywhere."
+    },
+    "probe": {
+      "enum": [
+        "judge"
+      ],
+      "description": "Not run against the agent; tests the LLM judge."
+    },
+    "synthetic_transcript": {
+      "type": "object",
+      "description": "The transcript a judge probe shows the judge."
+    }
+  },
+  "additionalProperties": false
+}
