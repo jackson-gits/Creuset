@@ -75,6 +75,11 @@ jobs:
             -e "LLM_ALLOWED_ENDPOINTS=chat/completions|models|responses|embeddings"
           echo "::endgroup::"
 
+          echo "::group::Anthropic (Messages API, key in x-api-key)"
+          render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=api.anthropic.com \
+            -e LLM_AUTH_HEADER=x-api-key -e "LLM_ALLOWED_ENDPOINTS=messages|models"
+          echo "::endgroup::"
+
           echo "::group::prefixed provider (path prefix, port, x-api-key, extra CA)"
           render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=openrouter.ai \
             -e LLM_UPSTREAM_PATH_PREFIX=/api -e LLM_UPSTREAM_PORT=8443 -e LLM_AUTH_HEADER=x-api-key \

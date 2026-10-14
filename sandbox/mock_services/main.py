@@ -76,7 +76,10 @@ _RUN_HEADER = "x-creuset-run"
 _SHARED_RUN = "shared"
 _MAX_RUNS = 2000  # oldest run worlds are evicted beyond this
 
-_TOOL_NAME = r"^[a-z][a-z0-9_]{0,63}$"
+# What OpenAI and Anthropic accept for a function name (letters, digits, _ and -,
+# at most 64), plus dots for MCP-style namespaced tools (`files.read`). It may
+# not start with "-" or ".": names end up in URLs, logs and command lines.
+_TOOL_NAME = r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$"
 _MAX_RESPONSES = 64            # canned tool responses per run
 _MAX_JSON_BYTES = 64 * 1024    # per canned response, and per generic tool call's args
 _CLIPPED_ARGS_CHARS = 2000     # what an oversized call's args are recorded as

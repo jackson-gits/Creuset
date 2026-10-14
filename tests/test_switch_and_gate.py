@@ -83,8 +83,9 @@ def gate_env(tmp_path, monkeypatch):
     calls = {"suite": [], "deploy": []}
     manifest = _manifest(tmp_path)
 
-    def suite(variant, library=None, agent_image=None):
+    def suite(variant, library=None, agent_image=None, extra_args=()):
         calls["suite"].append({"variant": variant, "library": library, "agent_image": agent_image})
+        calls["suite_args"] = list(extra_args)
         return manifest
     monkeypatch.setattr(run_gate, "_run_attack_suite", suite)
 
@@ -264,3 +265,22 @@ def test_deploy_refuses_unreadable_state(deploy_env, state_dir):
     outcome = run_gate._deploy("v2", "hardened", IMAGE)
     assert not outcome["ok"] and outcome["slot"] is None
     assert deploy_env == {"stage": [], "switch": []}
+
+
+def test_agent_settings_pass_through_to_the_suite(gate_env, monkeypatch, tmp_path):
+    _, calls = gate_env
+    _scorer(monkeypatch)
+    env_file = tmp_path / "agent.env"
+    env_file.write_text("REGION=eu\n", encoding="utf-8")
+    result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--dry-run",
+                                          "--agent-env", "FEATURE_X=on", "--agent-env-file", str(env_file)])
+    assert result.exit_code == 0, result.output
+    assert calls["suite_args"] == ["--agent-env", "FEATURE_X=on", "--agent-env-file", str(env_file)]
+
+
+def test_agent_settings_that_touch_the_contract_are_rejected_up_front(gate_env):
+    logs, calls = gate_env
+    result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--dry-run",
+                                          "--agent-env", "OPENAI_BASE_URL=http://elsewhere"])
+    assert result.exit_code == 2 and calls["suite"] == []
+    assert "OPENAI_BASE_URL" in _records(logs)[0]["error"]

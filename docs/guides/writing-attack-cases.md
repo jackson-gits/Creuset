@@ -233,7 +233,7 @@ cases:
 
 Every call your agent makes to `POST $CREUSET_MOCK_URL/tools/<name>` is
 recorded server-side and answered from the run's `tool_responses` (otherwise
-`{"status": "ok"}`). Tool names are lower-case `snake_case`. At most 64 canned
+`{"status": "ok"}`). Tool names are case-sensitive: letters, digits, `_`, `-` and `.`. At most 64 canned
 responses per case, each at most 64 KiB of JSON.
 [Testing your own agent](testing-your-agent.md) covers the other side of the
 contract, and [`examples/scripted-agent/`](../../examples/scripted-agent/) is a

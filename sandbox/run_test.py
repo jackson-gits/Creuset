@@ -43,6 +43,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -53,7 +54,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 import typer
@@ -138,10 +139,15 @@ def validate_label(variant: str) -> Optional[str]:
 
 @dataclass(frozen=True)
 class Subject:
-    """The agent under test: an image, and the variant label it runs as."""
+    """
+    The agent under test: an image, the variant label it runs as, and the
+    agent's own settings (`env`, never secrets: whatever is passed here is
+    readable by a hijacked agent).
+    """
     image: str
     variant: str
     bundled: bool
+    env: Tuple[Tuple[str, str], ...] = ()
 
     def args(self) -> List[str]:
         # An external image runs its own ENTRYPOINT/CMD and finds the scenario
@@ -151,8 +157,18 @@ class Subject:
         return []
 
     def describe(self) -> Dict[str, Any]:
-        return {"kind": "bundled" if self.bundled else "external",
-                "image": self.image, "variant": self.variant}
+        described: Dict[str, Any] = {"kind": "bundled" if self.bundled else "external",
+                                     "image": self.image, "variant": self.variant}
+        if self.env:
+            # Names, and a fingerprint of the values: enough to tell two runs'
+            # configurations apart without writing the values into every log.
+            described["env"] = [name for name, _ in self.env]
+            described["env_sha256"] = env_fingerprint(self.env)
+        return described
+
+
+def env_fingerprint(env: Tuple[Tuple[str, str], ...]) -> str:
+    return hashlib.sha256(json.dumps(sorted(env), separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def subject_problem(variant: str, agent_image: Optional[str] = None) -> Optional[str]:
@@ -164,17 +180,19 @@ def subject_problem(variant: str, agent_image: Optional[str] = None) -> Optional
     return validate_label(variant)
 
 
-def make_subject(variant: str, agent_image: Optional[str] = None) -> Subject:
-    """The subject for (variant, agent_image); raises ValueError if it cannot run."""
+def make_subject(variant: str, agent_image: Optional[str] = None,
+                 env: Tuple[Tuple[str, str], ...] = ()) -> Subject:
+    """The subject for (variant, agent_image, env); raises ValueError if it cannot run."""
     problem = subject_problem(variant, agent_image)
     if problem:
         raise ValueError(problem)
     if agent_image:
-        return Subject(image=agent_image, variant=variant, bundled=False)
-    return Subject(image=AGENT_IMAGE, variant=variant, bundled=True)
+        return Subject(image=agent_image, variant=variant, bundled=False, env=tuple(env))
+    return Subject(image=AGENT_IMAGE, variant=variant, bundled=True, env=tuple(env))
 
 
-# The ONLY environment a test container receives.
+# The environment every test container receives; the subject's own `env` is
+# added after it, and may not touch any of these names.
 def _container_env(run_id: str, variant: str) -> Dict[str, str]:
     llm_base = os.getenv("AGENT_API_BASE", "http://llm-proxy:11434/openai/v1")
     return {
@@ -187,6 +205,10 @@ def _container_env(run_id: str, variant: str) -> Dict[str, str]:
         "OPENAI_BASE_URL": llm_base,
         "OPENAI_API_BASE": llm_base,
         "OPENAI_API_KEY": "sandbox-placeholder-key",  # real key injected by llm-proxy
+        # Anthropic's SDK appends /v1/messages to its base URL itself, so it gets
+        # the gateway's root (llm-proxy pointed at api.anthropic.com).
+        "ANTHROPIC_BASE_URL": os.getenv("AGENT_ANTHROPIC_BASE", "http://llm-proxy:11434"),
+        "ANTHROPIC_API_KEY": "sandbox-placeholder-key",
         "AGENT_MODEL": os.getenv("AGENT_MODEL", "gpt-4o-mini"),
         # The bundled agent's knobs. Harmless to any other image.
         "MOCK_SERVICES_HOST": "mock-services",
@@ -200,17 +222,113 @@ def _container_env(run_id: str, variant: str) -> Dict[str, str]:
     }
 
 
+# ── The agent's own settings ──────────────────────────────────────────────────
+
+HARNESS_ENV = frozenset(_container_env("x", "x"))
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def parse_agent_env(pairs: Sequence[str] = (), env_file: Optional[Path] = None) -> Tuple[Tuple[str, str], ...]:
+    """
+    The agent's own settings, from an env file (KEY=VALUE lines, # comments)
+    and then `KEY=VALUE` pairs, which override the file. Raises ValueError.
+
+    Real agents need their own configuration (a feature flag, a prompt path, a
+    region), and the sandbox passes nothing from the host by default. What it
+    refuses: a name the harness sets (the contract, the LLM endpoint), the
+    CREUSET_ namespace, and values that are not one line.
+    """
+    merged: Dict[str, str] = {}
+    sources: List[Tuple[str, str]] = []
+    if env_file is not None:
+        for number, line in enumerate(env_file.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                raise ValueError(f"{env_file}:{number}: expected KEY=VALUE")
+            sources.append((stripped.removeprefix("export "), f"{env_file}:{number}"))
+    sources.extend((pair, "--agent-env") for pair in pairs)
+    for text, where in sources:
+        name, sep, value = text.partition("=")
+        name = name.strip()
+        if not sep:
+            raise ValueError(f"{where}: expected KEY=VALUE, not {text!r}")
+        if not _ENV_NAME.fullmatch(name):
+            raise ValueError(f"{where}: {name!r} is not an environment variable name")
+        if name in HARNESS_ENV or name.startswith("CREUSET_"):
+            raise ValueError(f"{where}: {name} is set by the harness and cannot be overridden")
+        if "\n" in value or "\r" in value or "\0" in value:
+            raise ValueError(f"{where}: the value of {name} must be one line")
+        merged[name] = value
+    return tuple(sorted(merged.items()))
+
+
+# ── Sandbox limits ────────────────────────────────────────────────────────────
+
+_SIZE = re.compile(r"^[1-9][0-9]{0,6}[kmg]?$")
+_CPUS = re.compile(r"^(?:[1-9][0-9]?|0)(?:\.[0-9]{1,2})?$")
+_TMPFS_DIR = re.compile(r"^(?:/[A-Za-z0-9_.-]+)+$")
+
+
+@dataclass(frozen=True)
+class SandboxLimits:
+    """
+    The box a test container runs in. The defaults are what every published
+    result ran under; real agent images often need more memory, or a writable
+    cache directory, and the read-only root filesystem allows only /tmp.
+    """
+    memory: str = "512m"
+    cpus: str = "1.0"
+    pids: int = 256
+    tmp_size: str = "64m"
+    tmpfs: Tuple[str, ...] = ()   # extra writable directories, each its own noexec tmpfs
+
+    def flags(self) -> List[str]:
+        mount = f"rw,noexec,nosuid,size={self.tmp_size}"
+        flags = ["--network", NETWORK, "--read-only", "--tmpfs", f"/tmp:{mount}"]
+        for directory in self.tmpfs:
+            flags += ["--tmpfs", f"{directory}:{mount}"]
+        return flags + [
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", str(self.pids),
+            "--memory", self.memory,
+            "--cpus", self.cpus,
+            "--no-healthcheck",
+        ]
+
+    def describe(self) -> Dict[str, Any]:
+        return {"memory": self.memory, "cpus": self.cpus, "pids": self.pids,
+                "tmp_size": self.tmp_size, "tmpfs": list(self.tmpfs)}
+
+
+def limits_from_env(env: Mapping[str, str] = os.environ) -> SandboxLimits:
+    """CREUSET_SANDBOX_* as SandboxLimits; raises ValueError naming the bad setting."""
+    defaults = SandboxLimits()
+    memory = env.get("CREUSET_SANDBOX_MEMORY", "").strip().lower() or defaults.memory
+    cpus = env.get("CREUSET_SANDBOX_CPUS", "").strip() or defaults.cpus
+    pids = env.get("CREUSET_SANDBOX_PIDS", "").strip() or str(defaults.pids)
+    tmp_size = env.get("CREUSET_SANDBOX_TMP_SIZE", "").strip().lower() or defaults.tmp_size
+    tmpfs = tuple(d.strip() for d in env.get("CREUSET_SANDBOX_TMPFS", "").split(",") if d.strip())
+    if not _SIZE.fullmatch(memory):
+        raise ValueError(f"CREUSET_SANDBOX_MEMORY={memory!r}: a size such as 512m or 2g")
+    if not _CPUS.fullmatch(cpus) or float(cpus) <= 0:
+        raise ValueError(f"CREUSET_SANDBOX_CPUS={cpus!r}: a number of CPUs such as 1.0 or 2")
+    if not pids.isdigit() or not 16 <= int(pids) <= 32768:
+        raise ValueError(f"CREUSET_SANDBOX_PIDS={pids!r}: a whole number from 16 to 32768")
+    if not _SIZE.fullmatch(tmp_size):
+        raise ValueError(f"CREUSET_SANDBOX_TMP_SIZE={tmp_size!r}: a size such as 64m")
+    for directory in tmpfs:
+        if not _TMPFS_DIR.fullmatch(directory) or "/../" in directory + "/" or "/./" in directory + "/":
+            raise ValueError(f"CREUSET_SANDBOX_TMPFS: {directory!r} is not an absolute directory path")
+        if directory in ("/tmp", SCENARIO_MOUNT):
+            raise ValueError(f"CREUSET_SANDBOX_TMPFS: {directory} is already mounted by the harness")
+    return SandboxLimits(memory=memory, cpus=cpus, pids=int(pids), tmp_size=tmp_size, tmpfs=tmpfs)
+
+
 def _sandbox_flags() -> List[str]:
-    return [
-        "--network", NETWORK,
-        "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
-        "--pids-limit", "256",
-        "--memory", "512m",
-        "--cpus", "1.0",
-        "--no-healthcheck",
-    ]
+    return limits_from_env().flags()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -275,6 +393,10 @@ def _failure(case_id: str, subject: Subject, run_id: str, status: str, error: st
 def preflight(subject: Optional[Subject] = None) -> List[str]:
     """Return a list of problems that make sandbox runs impossible (empty = ready)."""
     problems: List[str] = []
+    try:
+        limits_from_env()
+    except ValueError as e:
+        problems.append(str(e))
     try:
         info = _docker(["info", "--format", "{{.ServerVersion}}"], timeout=20)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -467,6 +589,12 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
                         f"Could not create the run's mock world: {problem}", time.time() - setup_start,
                         image_ref)
 
+    try:
+        flags = _sandbox_flags()
+    except ValueError as e:
+        return _failure(case_id, subject, run_id, "harness_error", f"Sandbox limits: {e}",
+                        time.time() - setup_start, image_ref)
+
     start = time.time()  # elapsed_seconds is the container's wall time, not the setup's
 
     with tempfile.TemporaryDirectory(prefix="creuset-") as tmp:
@@ -475,8 +603,10 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
         # forbidden_tools, patterns...), which an agent could otherwise read.
         scenario_path.write_text(json.dumps(agent_scenario(case)), encoding="utf-8")
 
-        cmd = ["run", "--rm", "--name", container, *_sandbox_flags()]
-        for k, v in _container_env(run_id, subject.variant).items():
+        cmd = ["run", "--rm", "--name", container, *flags]
+        # The harness's variables, then the agent's own settings, which
+        # parse_agent_env() has already kept off every name the harness sets.
+        for k, v in [*_container_env(run_id, subject.variant).items(), *subject.env]:
             cmd += ["-e", f"{k}={v}"]
         cmd += ["-v", f"{scenario_path.resolve().as_posix()}:{SCENARIO_MOUNT}:ro",
                 image_ref, *subject.args()]
@@ -566,13 +696,17 @@ def main(
     variant: str = typer.Option("hardened", "--variant", help="Bundled agent: naive | hardened | broken. With --agent-image: any label."),
     agent_image: Optional[str] = typer.Option(None, "--agent-image", envvar="CREUSET_AGENT_IMAGE",
                                               help="Test this image instead of the bundled agent (see sandbox/contract.py)."),
+    agent_env: Optional[List[str]] = typer.Option(None, "--agent-env", metavar="KEY=VALUE",
+                                                  help="A setting for the agent's container (repeatable). Never a secret."),
+    agent_env_file: Optional[Path] = typer.Option(None, "--agent-env-file", envvar="CREUSET_AGENT_ENV_FILE",
+                                                  help="KEY=VALUE lines for the agent's container. Never secrets."),
     save: bool = typer.Option(True, "--save/--no-save", help="Save transcript to logs/"),
     check: bool = typer.Option(False, "--check", help="Only run preflight + isolation probe"),
 ) -> None:
     """Run a single test case through the sandbox and print the transcript JSON on stdout."""
     try:
-        subject = make_subject(variant, agent_image)
-    except ValueError as e:
+        subject = make_subject(variant, agent_image, parse_agent_env(agent_env or (), agent_env_file))
+    except (OSError, ValueError) as e:
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(code=2)
     problems = preflight(subject)

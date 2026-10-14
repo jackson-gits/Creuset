@@ -50,6 +50,8 @@ x-agent-env: &agent-env
   OPENAI_BASE_URL: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
   OPENAI_API_BASE: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
   OPENAI_API_KEY: sandbox-placeholder-key   # real key is injected by llm-proxy
+  ANTHROPIC_BASE_URL: ${AGENT_ANTHROPIC_BASE:-http://llm-proxy:11434}
+  ANTHROPIC_API_KEY: sandbox-placeholder-key
   AGENT_MODEL: ${AGENT_MODEL:?set AGENT_MODEL in .env}
   MOCK_SERVICES_HOST: mock-services
   MOCK_SERVICES_PORT: "8001"

@@ -381,7 +381,9 @@ USER_AGENT = "creuset-doctor/1"
 _MODELS_PROBE = (
     "import sys, urllib.request, urllib.error\n"
     "try:\n"
-    "    req = urllib.request.Request(sys.argv[1], headers={'User-Agent': sys.argv[2]})\n"
+    # anthropic-version: Anthropic's /v1/models requires it; other providers ignore it.
+    "    req = urllib.request.Request(sys.argv[1], headers={'User-Agent': sys.argv[2],\n"
+    "                                                   'anthropic-version': '2023-06-01'})\n"
     "    r = urllib.request.urlopen(req, timeout=20); print(r.status)\n"
     "except urllib.error.HTTPError as e: print(e.code)\n"
     "except Exception as e: print(type(e).__name__)\n"

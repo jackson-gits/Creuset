@@ -65,6 +65,7 @@ and [`schemas/transcript.v1.json`](../../schemas/transcript.v1.json). In short:
 | `CREUSET_MOCK_URL` | This run's mock world, e.g. `http://mock-services:8001/r/<run id>` |
 | `OPENAI_BASE_URL`, `OPENAI_API_BASE` | The LLM gateway (`llm-proxy`), under both names clients read |
 | `OPENAI_API_KEY` | A placeholder. The real key never enters your container. |
+| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` | The same gateway and placeholder, for Anthropic's SDK |
 | `AGENT_MODEL` | The model to request |
 | `CREUSET_RUN_ID` | This run's id, already part of `CREUSET_MOCK_URL` |
 | `CREUSET_VARIANT` | The label the run was started with |
@@ -87,8 +88,8 @@ Your image runs with its own `ENTRYPOINT`/`CMD` and no arguments. The box:
 
 ### Calling the LLM
 
-Use any OpenAI-compatible client with its defaults: the official SDK picks up
-`OPENAI_BASE_URL` and `OPENAI_API_KEY` by itself. `llm-proxy` swaps in the real
+Use any OpenAI-compatible client, or Anthropic's SDK, with its defaults: each picks
+up its `*_BASE_URL` and `*_API_KEY` by itself. `llm-proxy` swaps in the real
 key and forwards only an allowlist of API paths to one upstream host. By default
 that is `chat/completions` and `models` on Groq. Everything else gets a 403, and
 that includes the files and batch APIs, which act on the account behind the key.
@@ -98,6 +99,7 @@ that includes the files and batch APIs, which act on the account behind the key.
 | the Responses API or embeddings | `LLM_ALLOWED_ENDPOINTS=chat/completions\|models\|responses\|embeddings` |
 | OpenAI rather than Groq | `LLM_UPSTREAM_HOST=api.openai.com`, `AGENT_API_BASE=http://llm-proxy:11434/v1` |
 | a gateway with a path prefix (OpenRouter) | `LLM_UPSTREAM_HOST=openrouter.ai`, `LLM_UPSTREAM_PATH_PREFIX=/api` |
+| Anthropic's own API (the `anthropic` SDK) | `LLM_UPSTREAM_HOST=api.anthropic.com`, `LLM_AUTH_HEADER=x-api-key`, `LLM_ALLOWED_ENDPOINTS=messages\|models`, `AGENT_API_BASE=http://llm-proxy:11434/v1` |
 | a key in another header | `LLM_AUTH_HEADER=x-api-key` |
 
 Each setting is validated when `llm-proxy` starts, and it refuses to start on
@@ -116,7 +118,8 @@ POST $CREUSET_MOCK_URL/tools/<tool_name>      body: the arguments, as JSON
 
 The call is recorded in the run's server-side audit log, and the answer comes
 from the case's `tool_responses` for that tool, or `{"status": "ok"}` when it
-has none. Tool names are lower-case `snake_case`. The audit log is the ground
+has none. Tool names are what OpenAI and Anthropic tool calling accept (letters, digits,
+`_` and `-`), plus dots for MCP-style names. The audit log is the ground
 truth: the judge checks forbidden tools against it as well as against your
 transcript, so a call your agent leaves out of its own report is still caught.
 

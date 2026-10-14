@@ -281,3 +281,73 @@ def test_isolation_probe_runs_mock_services_own_image(monkeypatch):
     assert run_test.isolation_probe()["ok"] is True
     run = calls[-1]
     assert "sha256:mockimage" in run and run_test.NETWORK in run and "--cap-drop" in run
+
+
+# ── The agent's own settings and the box's size ───────────────────────────────
+
+def test_agent_env_from_file_and_pairs(tmp_path):
+    env_file = tmp_path / "agent.env"
+    env_file.write_text("# settings\nFEATURE_X=on\nexport REGION=eu-west-1\nPROMPT=a=b\n", encoding="utf-8")
+    env = run_test.parse_agent_env(["FEATURE_X=off", "EMPTY="], env_file)
+    assert env == (("EMPTY", ""), ("FEATURE_X", "off"), ("PROMPT", "a=b"), ("REGION", "eu-west-1"))
+
+
+@pytest.mark.parametrize("pair", [
+    "OPENAI_BASE_URL=http://evil", "OPENAI_API_KEY=x", "ANTHROPIC_BASE_URL=x", "AGENT_MODEL=x",
+    "CREUSET_ANYTHING=1", "CREUSET_RUN_ID=x", "1BAD=x", "BAD NAME=x", "NOEQUALS", "MULTI=a\nb",
+])
+def test_agent_env_cannot_touch_the_contract_or_smuggle_lines(pair):
+    with pytest.raises(ValueError):
+        run_test.parse_agent_env([pair])
+
+
+def test_agent_env_reaches_the_container_after_the_contract(docker):
+    fake = docker(agent_stdout=COMPLETED)
+    subject = run_test.make_subject("v1", "my-agent:1", run_test.parse_agent_env(["FEATURE_X=on"]))
+    t = run_test.run_case(_case(), "v1", subject)
+    args = fake.run_args()
+    env = [args[i + 1] for i, a in enumerate(args) if a == "-e"]
+    assert env[-1] == "FEATURE_X=on"
+    assert t["status"] == "completed"
+    described = subject.describe()
+    assert described["env"] == ["FEATURE_X"] and "on" not in json.dumps(described)
+
+
+def test_default_limits_are_the_published_ones():
+    """Every published result ran in exactly this box; the defaults must not move."""
+    assert run_test.limits_from_env({}).flags() == [
+        "--network", run_test.NETWORK, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256",
+        "--memory", "512m", "--cpus", "1.0", "--no-healthcheck"]
+
+
+def test_limits_can_grow_and_add_writable_caches():
+    limits = run_test.limits_from_env({
+        "CREUSET_SANDBOX_MEMORY": "2G", "CREUSET_SANDBOX_CPUS": "2", "CREUSET_SANDBOX_PIDS": "1024",
+        "CREUSET_SANDBOX_TMPFS": "/home/agent/.cache, /app/.npm"})
+    flags = limits.flags()
+    assert flags[flags.index("--memory") + 1] == "2g" and flags[flags.index("--cpus") + 1] == "2"
+    assert "/home/agent/.cache:rw,noexec,nosuid,size=64m" in flags
+    assert "/app/.npm:rw,noexec,nosuid,size=64m" in flags
+    # The hardening never goes away, whatever the size.
+    assert {"--read-only", "--cap-drop", "no-new-privileges", "--no-healthcheck"} <= set(flags)
+
+
+@pytest.mark.parametrize("name, value", [
+    ("CREUSET_SANDBOX_MEMORY", "lots"), ("CREUSET_SANDBOX_MEMORY", "-1m"),
+    ("CREUSET_SANDBOX_CPUS", "0"), ("CREUSET_SANDBOX_CPUS", "two"),
+    ("CREUSET_SANDBOX_PIDS", "1"), ("CREUSET_SANDBOX_PIDS", "lots"),
+    ("CREUSET_SANDBOX_TMPFS", "relative/dir"), ("CREUSET_SANDBOX_TMPFS", "/a/../etc"),
+    ("CREUSET_SANDBOX_TMPFS", "/tmp"), ("CREUSET_SANDBOX_TMPFS", "/x:exec"),
+])
+def test_bad_limits_are_refused_by_name(name, value):
+    with pytest.raises(ValueError, match=name):
+        run_test.limits_from_env({name: value})
+
+
+def test_bad_limits_fail_the_case_closed(docker, monkeypatch):
+    monkeypatch.setenv("CREUSET_SANDBOX_MEMORY", "lots")
+    fake = docker(agent_stdout=COMPLETED)
+    t = run_test.run_case(_case(), "broken")
+    assert t["status"] == "harness_error" and "CREUSET_SANDBOX_MEMORY" in t["error"]
+    assert not any(a[0] == "run" for a in fake.calls)

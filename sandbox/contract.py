@@ -94,6 +94,9 @@ CONTRACT_ENV: Dict[str, str] = {
     "OPENAI_BASE_URL": "The LLM gateway (llm-proxy). The name the OpenAI SDK reads by default.",
     "OPENAI_API_BASE": "The same URL, under the name LangChain and older clients read.",
     "OPENAI_API_KEY": "A placeholder. llm-proxy injects the real key, so the agent never holds it.",
+    "ANTHROPIC_BASE_URL": "The gateway's root, for Anthropic's SDK (which appends /v1/messages). "
+                          "Works when llm-proxy points at api.anthropic.com.",
+    "ANTHROPIC_API_KEY": "A placeholder, as for OPENAI_API_KEY.",
     "AGENT_MODEL": "The model to request from the gateway.",
 }
 

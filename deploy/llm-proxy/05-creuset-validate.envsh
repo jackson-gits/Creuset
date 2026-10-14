@@ -37,7 +37,8 @@
 #                            still matches exactly), e.g. /api for OpenRouter:
 #                            /v1/models -> https://openrouter.ai/api/v1/models.
 #   LLM_ALLOWED_ENDPOINTS    chat/completions|models (default); may add
-#                            responses, embeddings, completions. Nothing else:
+#                            responses, embeddings, completions, and messages
+#                            (Anthropic's Messages API). Nothing else:
 #                            files, batches or fine_tuning would hand a hijacked
 #                            agent the account behind the key.
 #   LLM_AUTH_HEADER          Authorization (default), or e.g. api-key, x-api-key.
@@ -147,9 +148,9 @@ _creuset_ifs=$IFS
 IFS='|'
 for _creuset_endpoint in $LLM_ALLOWED_ENDPOINTS; do
     case "$_creuset_endpoint" in
-        chat/completions | completions | embeddings | models | responses) ;;
+        chat/completions | completions | embeddings | models | responses | messages) ;;
         *) IFS=$_creuset_ifs
-           _creuset_die "LLM_ALLOWED_ENDPOINTS may contain only chat/completions, completions, embeddings, models and responses, not '$_creuset_endpoint': other APIs (files, batches, fine_tuning...) act on the account behind the key." ;;
+           _creuset_die "LLM_ALLOWED_ENDPOINTS may contain only chat/completions, completions, embeddings, models, responses and messages, not '$_creuset_endpoint': other APIs (files, batches, fine_tuning...) act on the account behind the key." ;;
     esac
 done
 IFS=$_creuset_ifs

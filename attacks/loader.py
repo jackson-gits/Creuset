@@ -62,7 +62,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 sys.path.insert(0, str(_ROOT / "sandbox"))
 from run_test import (  # noqa: E402
-    Subject, image_id, make_subject, preflight, run_case,
+    Subject, env_fingerprint, image_id, limits_from_env, make_subject, parse_agent_env, preflight,
+    run_case,
 )
 
 app = typer.Typer(add_completion=False)
@@ -340,6 +341,8 @@ def run_suite(
         # What ran: the image ID binds every verdict in this batch to the bytes
         # that produced it, so a rebuild cannot be resumed into the same batch.
         "subject": {**subject.describe(), "image_id": started_image_id},
+        # The box it ran in: memory, CPUs and writable paths can change behaviour.
+        "sandbox": limits_from_env().describe(),
         "library": str(library.resolve()),
         "categories": categories,
         "selected_ids": selected_ids,  # ad-hoc subset: coverage applies to these only
@@ -412,16 +415,26 @@ def _reconcile_with_disk(batch_dir: Path, in_scope: List[Dict[str, Any]],
     return changed
 
 
-def _manifest_subject(manifest: Dict[str, Any]) -> Tuple[Subject, List[str]]:
+def _manifest_subject(manifest: Dict[str, Any],
+                      agent_env: Tuple[Tuple[str, str], ...] = ()) -> Tuple[Subject, List[str]]:
     """
     The subject a batch ran, and every image ID recorded for it (empty if none
     was). Manifests older than `subject` were always the bundled agent.
+
+    The agent's settings are not stored (only their names and a fingerprint),
+    so they come from the caller and must reproduce the fingerprint exactly.
     """
     recorded = manifest.get("subject") or {}
     variant = manifest.get("variant")
     external = recorded.get("kind") == "external"
+    if (env_fingerprint(agent_env) if agent_env else None) != recorded.get("env_sha256"):
+        names = recorded.get("env") or []
+        raise ValueError(
+            f"This batch ran with agent settings {names or 'none'}; resume it with exactly the same "
+            f"--agent-env / --agent-env-file (the values are checked against a fingerprint), or "
+            f"start a new batch.")
     try:
-        subject = make_subject(variant, recorded.get("image") if external else None)
+        subject = make_subject(variant, recorded.get("image") if external else None, agent_env)
     except ValueError as e:
         raise ValueError(f"Manifest names an unusable subject: {e}") from e
     ids = {e["agent_image_id"] for e in manifest.get("cases", []) if e.get("agent_image_id")}
@@ -438,6 +451,7 @@ def resume_suite(
     allow_model_change: bool = False,
     on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any], Path], None]] = None,
     allow_image_change: bool = False,
+    agent_env: Tuple[Tuple[str, str], ...] = (),
 ) -> Path:
     """
     Finish a batch that stopped early, re-running only the cases that need it.
@@ -458,7 +472,7 @@ def resume_suite(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     variant = manifest.get("variant")
-    subject, previous_images = _manifest_subject(manifest)
+    subject, previous_images = _manifest_subject(manifest, agent_env)
     library = Path(manifest["library"])
     if not library.exists():
         raise FileNotFoundError(f"Library {library} named by the manifest no longer exists.")
@@ -606,11 +620,20 @@ def main(
     allow_image_change: bool = typer.Option(False, "--allow-image-change",
                                             help="With --resume, allow finishing a batch after the agent image "
                                                  "was rebuilt. Makes the batch internally incomparable."),
+    agent_env: Optional[List[str]] = typer.Option(None, "--agent-env", metavar="KEY=VALUE",
+                                                  help="A setting for the agent's container (repeatable). Never a secret."),
+    agent_env_file: Optional[Path] = typer.Option(None, "--agent-env-file", envvar="CREUSET_AGENT_ENV_FILE",
+                                                  help="KEY=VALUE lines for the agent's container. Never secrets."),
     agent_image: Optional[str] = typer.Option(None, "--agent-image", envvar="CREUSET_AGENT_IMAGE",
                                               help="Test this image instead of the bundled agent; --variant is "
                                                    "then just its label (see sandbox/contract.py)."),
 ) -> None:
     """Validate the library and batch-run its cases through the sandbox."""
+    try:
+        env = parse_agent_env(agent_env or (), agent_env_file)
+    except (OSError, ValueError) as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(code=2)
     if resume:
         # The variant, library and case selection all come from the batch being
         # resumed; passing them again could only contradict it.
@@ -621,6 +644,7 @@ def main(
                 [c.strip() for c in redo.split(",")] if redo else None,
                 allow_model_change,
                 allow_image_change=allow_image_change,
+                agent_env=env,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             console.print(f"[red]✗ {e}[/red]")
@@ -649,7 +673,7 @@ def main(
         raise typer.Exit(code=0)
 
     try:
-        subject = make_subject(variant, agent_image)
+        subject = make_subject(variant, agent_image, env)
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(code=2)

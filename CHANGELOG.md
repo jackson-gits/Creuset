@@ -26,6 +26,23 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **Claude agents.** llm-proxy can allow Anthropic's Messages API
+  (`LLM_ALLOWED_ENDPOINTS=messages|models`, key in `x-api-key`), and every agent
+  container gets `ANTHROPIC_BASE_URL` and a placeholder `ANTHROPIC_API_KEY`, so
+  an agent on Anthropic's own SDK runs unchanged. `messages/batches` stays
+  refused. Verified live against a fake upstream: the placeholder is replaced,
+  the agent's `Authorization` is dropped, `anthropic-version` passes through.
+- **Real agents' tool names**: camelCase, hyphens and MCP-style dots
+  (`lookupOrder`, `issue-refund`, `files.read`), as OpenAI and Anthropic tool
+  calling accept them. Previously only lower-case `snake_case`.
+- **The agent's own settings**: `--agent-env KEY=VALUE` and `--agent-env-file`
+  (or `CREUSET_AGENT_ENV_FILE`) on `run_test.py`, the loader and the gate. Names
+  the harness sets are refused; manifests record the names and a fingerprint of
+  the values, and `--resume` requires the same settings.
+- **Sandbox size**: `CREUSET_SANDBOX_MEMORY`, `_CPUS`, `_PIDS`, `_TMP_SIZE`, and
+  `CREUSET_SANDBOX_TMPFS` for extra writable directories (each a `noexec` tmpfs,
+  for caches under a read-only root). Defaults unchanged and pinned by a test;
+  every manifest records the box it ran in.
 - **Bring your own agent.** `--agent-image` on `sandbox/run_test.py`,
   `attacks/loader.py` and `gate/run_gate.py` (or `CREUSET_AGENT_IMAGE`) tests
   any image that honours the agent contract, with `--variant` as its label.

@@ -41,7 +41,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import typer
 from dotenv import load_dotenv
@@ -75,7 +75,7 @@ sys.path.insert(0, str(_ROOT / "deploy"))
 sys.path.insert(0, str(_ROOT / "sandbox"))
 sys.path.insert(0, str(_ROOT / "judge"))
 from model_judge import JudgeConfigError, check_config  # noqa: E402
-from run_test import AGENT_IMAGE, image_id, subject_problem  # noqa: E402
+from run_test import AGENT_IMAGE, image_id, parse_agent_env, subject_problem  # noqa: E402
 from switch import StateError, inactive_slot, load_state, validate_build  # noqa: E402
 
 
@@ -92,7 +92,8 @@ def _newest_manifest(since: float) -> Optional[Path]:
 
 
 def _run_attack_suite(variant: str, library: Optional[Path] = None,
-                      agent_image: Optional[str] = None) -> Optional[Path]:
+                      agent_image: Optional[str] = None,
+                      extra_args: Sequence[str] = ()) -> Optional[Path]:
     """
     Run the attack library through the sandbox (calls loader.py).
     Returns the path to the batch manifest, or None on failure.
@@ -106,6 +107,7 @@ def _run_attack_suite(variant: str, library: Optional[Path] = None,
         cmd += ["--library", str(library)]
     if agent_image:
         cmd += ["--agent-image", agent_image]
+    cmd += list(extra_args)
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
     started = time.time()
@@ -313,6 +315,10 @@ def main(
     agent_image: Optional[str] = typer.Option(None, "--agent-image", envvar="CREUSET_AGENT_IMAGE",
                                               help="Gate this image instead of the bundled agent. Requires --dry-run: "
                                                    "the blue/green slots run the bundled agent only."),
+    agent_env: Optional[List[str]] = typer.Option(None, "--agent-env", metavar="KEY=VALUE",
+                                                  help="A setting for the agent's container (repeatable). Never a secret."),
+    agent_env_file: Optional[Path] = typer.Option(None, "--agent-env-file", envvar="CREUSET_AGENT_ENV_FILE",
+                                                  help="KEY=VALUE lines for the agent's container. Never secrets."),
 ) -> None:
     """
     Run the full Creuset deployment gate.
@@ -332,6 +338,11 @@ def main(
                    "gate can give a verdict on another image but cannot deploy it")
     if not problem and library is not None and not library.is_file():
         problem = f"library {library} does not exist"
+    if not problem:
+        try:
+            parse_agent_env(agent_env or (), agent_env_file)
+        except (OSError, ValueError) as e:
+            problem = f"agent settings: {e}"
     problem = problem or _judge_problem(skip_model_judge)
     if problem:
         record = _write_gate_record(version, _variant, None, "FAIL", "BLOCKED",
@@ -350,7 +361,10 @@ def main(
     )
 
     # ── Step 1: Run attack suite ──────────────────────────────────────────────
-    manifest = _run_attack_suite(_variant, library, agent_image)
+    suite_args: List[str] = [arg for pair in (agent_env or ()) for arg in ("--agent-env", pair)]
+    if agent_env_file:
+        suite_args += ["--agent-env-file", str(agent_env_file)]
+    manifest = _run_attack_suite(_variant, library, agent_image, suite_args)
 
     if manifest is None:
         # Fail-closed: sandbox runner failure = gate FAIL

@@ -27,8 +27,8 @@
   "$defs": {
     "toolName": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9_]{0,63}$",
-      "description": "Lower-case snake_case, as mock-services' generic POST /tools/{name} accepts."
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$",
+      "description": "A tool name as OpenAI and Anthropic tool calling accept it (letters, digits, _ and -, at most 64), plus dots for MCP-style namespaced names. It may not start with - or ., and is case-sensitive: lookupOrder and lookuporder are different tools."
     },
     "toolList": {"type": "array", "items": {"$ref": "#/$defs/toolName"}},
     "case": {

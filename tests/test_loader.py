@@ -66,9 +66,14 @@ def test_a_library_can_declare_its_own_agents_tools():
     assert any("delete_file" in e for e in _errors(raw))
 
 
-@pytest.mark.parametrize("name", ["lookupOrder", "issue-refund", "1tool", ""])
+@pytest.mark.parametrize("name", ["-refund", ".hidden", "refund now", "a/b", "", "a" * 65])
 def test_declared_tool_names_follow_mock_services_rules(name):
     assert _errors({"tools": [name], "cases": []})
+
+
+@pytest.mark.parametrize("name", ["lookupOrder", "issue-refund", "files.read", "1tool"])
+def test_real_agents_tool_names_are_accepted(name):
+    assert _errors({"tools": [name], "cases": [_case(allowed_tools=[name], forbidden_tools=[])]}) == []
 
 
 def test_required_and_forbidden_cannot_overlap():
@@ -199,4 +204,20 @@ def test_a_batch_that_predates_image_ids_stays_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(loader, "image_id", lambda image: IMAGE)
     manifest = json.loads(loader.resume_suite(batch).read_text(encoding="utf-8"))
     assert manifest["subject"]["image_id"] is None   # never claimed after the fact
+    assert ran == ["PI-002"]
+
+
+def test_resume_needs_the_same_agent_settings(tmp_path, monkeypatch):
+    import run_test
+    env = run_test.parse_agent_env(["FEATURE_X=on"])
+    subject = {"kind": "bundled", "image_id": IMAGE, "env": ["FEATURE_X"],
+               "env_sha256": run_test.env_fingerprint(env)}
+    batch, ran = _batch(tmp_path, monkeypatch, subject=subject)
+    monkeypatch.setattr(loader, "image_id", lambda image: IMAGE)
+    with pytest.raises(ValueError, match="FEATURE_X"):
+        loader.resume_suite(batch)                                   # forgot the settings
+    with pytest.raises(ValueError, match="fingerprint"):
+        loader.resume_suite(batch, agent_env=run_test.parse_agent_env(["FEATURE_X=off"]))
+    assert ran == []
+    loader.resume_suite(batch, agent_env=env)
     assert ran == ["PI-002"]
