@@ -37,7 +37,7 @@
       "x-creuset-owner": "agent",
       "type": "integer",
       "minimum": 0,
-      "description": "LLM calls the agent made in this run. Self-reported; shown in the `llm_budget` check's reason."
+      "description": "LLM calls the agent made in this run. Self-reported, but required in practice: the `llm_budget` rule check compares it with the case's `max_llm_calls` and fails closed when a versioned transcript does not report it, since the budget is then unverifiable."
     },
     "llm_calls_limit": {
       "x-creuset-owner": "agent",

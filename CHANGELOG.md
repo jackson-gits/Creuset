@@ -38,6 +38,13 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
   `metadata`. Case IDs may be longer (`ORDERS-0042`).
 - `examples/scripted-agent/`: a deterministic agent (no model, no key) and a
   library for it, exercising the whole contract.
+- `examples/openai-agent/`: the same contract with a real model, about a
+  hundred lines on the plain OpenAI SDK; run live through the sandbox.
+- Documentation: `docs/guides/testing-your-agent.md`,
+  `docs/guides/writing-attack-cases.md` (CONTRIBUTING and the attack-case issue
+  template linked to it before it existed), and `docs/reference/results.md` for
+  every field of the transcript, manifest, score report and gate record. A test
+  now checks every relative link and anchor in the Markdown docs.
 - `scripts/doctor.py`: checks the host, `.env`, Docker, Compose, the sandbox
   network, container health, stale images and containers, and deploy state,
   each with the command that fixes it. `--probe` proves isolation, `--online`

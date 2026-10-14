@@ -294,6 +294,8 @@ python gate/run_gate.py --version 0.1.0 --variant naive --agent-image my-agent  
 
 Every batch and report records the image ID it tested, and `--resume` refuses to finish a batch with a rebuilt image. The gate gives a verdict on any image; deploying one to the blue/green slots is supported for the bundled agent only, so `--agent-image` requires `--dry-run`.
 
+[`examples/openai-agent/`](examples/openai-agent/) is the same contract with a real model behind it: about a hundred lines on the plain OpenAI SDK. The full walkthrough is [docs/guides/testing-your-agent.md](docs/guides/testing-your-agent.md), cases for your agent are covered in [docs/guides/writing-attack-cases.md](docs/guides/writing-attack-cases.md), and every output field is in [docs/reference/results.md](docs/reference/results.md).
+
 ---
 
 ## Provider rate limits (read this before a long run)
@@ -373,7 +375,10 @@ creuset/
 │   ├── contract.py         The agent contract: what goes in, what comes out, who owns it
 │   └── mock_services/      Fake REST API, per-run worlds, server-side audit log
 ├── schemas/                transcript.v1.json, library.v1.json (JSON Schema)
-├── examples/scripted-agent Deterministic contract example (no model, no key)
+├── examples/
+│   ├── scripted-agent/     Deterministic contract example (no model, no key)
+│   └── openai-agent/       The same contract with a real model (plain OpenAI SDK)
+├── docs/                   Guides (your own agent, writing cases) and the results reference
 ├── scripts/
 │   ├── doctor.py           Is this machine ready? Says how to fix what is not
 │   └── update_baseline_lock.py  Fingerprints of every measurement-affecting surface
