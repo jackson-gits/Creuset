@@ -44,6 +44,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -69,7 +70,6 @@ for _stream in (sys.stdout, sys.stderr):
 console = Console()
 
 _ATTACK_LIB = _ROOT / "attacks" / "attack_library.yaml"
-_RUNS_DIR = _ROOT / "logs" / "runs"
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 _SCORE_SCRIPT = _ROOT / "judge" / "score.py"
 _LOADER_SCRIPT = _ROOT / "attacks" / "loader.py"
@@ -140,14 +140,26 @@ def _sigterm_interrupts() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
 
 
-def _newest_manifest(since: float) -> Optional[Path]:
+class SuiteInterrupted(KeyboardInterrupt):
+    """The attack suite was interrupted; `manifest` is its batch, if it got as far as one."""
+
+    def __init__(self, manifest: Optional[Path]) -> None:
+        super().__init__("the attack suite was interrupted")
+        self.manifest = manifest
+
+
+def _announced_manifest(out: Path) -> Optional[Path]:
     """
-    Newest batch manifest written by attacks/loader.py after `since`.
-    The time bound matters: scoring a manifest from an earlier run would
-    silently grade stale transcripts.
+    The manifest the loader named in its --manifest-out file. The gate used to
+    take the newest manifest written since it started, but Linux stamps files
+    from a coarse clock (a file written just after a time.time() can carry an
+    earlier mtime), and two gates in one checkout would take each other's.
     """
-    manifests = [p for p in _RUNS_DIR.glob("*/manifest.json") if p.stat().st_mtime >= since]
-    return max(manifests, key=lambda p: p.stat().st_mtime, default=None)
+    try:
+        path = Path(out.read_text(encoding="utf-8").strip())
+    except OSError:
+        return None
+    return path if path.name == "manifest.json" and path.is_file() else None
 
 
 def _run_attack_suite(variant: str, library: Optional[Path] = None,
@@ -169,19 +181,23 @@ def _run_attack_suite(variant: str, library: Optional[Path] = None,
     cmd += list(extra_args)
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
-    started = time.time()
-    returncode = _child(cmd)
+    with tempfile.TemporaryDirectory(prefix="creuset-gate-") as tmp:
+        out = Path(tmp) / "manifest-path"
+        try:
+            returncode = _child([*cmd, "--manifest-out", str(out)])
+        except KeyboardInterrupt:
+            raise SuiteInterrupted(_announced_manifest(out)) from None
+        manifest = _announced_manifest(out)
     if returncode == EXIT_INTERRUPTED:
-        raise KeyboardInterrupt("the attack suite was interrupted")
+        raise SuiteInterrupted(manifest)
     # 3: the batch stopped early. Still scored: its report is valid: false, the
     # gate blocks it, and the runs that were made show what failed and why.
     if returncode not in (0, _LOADER_INCOMPLETE):
         console.print("[red]✗ Attack suite runner failed (non-zero exit).[/red]")
         return None
 
-    manifest = _newest_manifest(started)
     if manifest is None:
-        console.print("[red]✗ No batch manifest found after loader run.[/red]")
+        console.print("[red]✗ The loader named no batch manifest.[/red]")
         return None
 
     return manifest
@@ -546,8 +562,8 @@ def _gate(version: str, variant: Optional[str], skip_model_judge: bool, dry_run:
     suite_args += [arg for t in tags for arg in ("--tag", t)]
     try:
         manifest = _run_attack_suite(_variant, library, agent_image, suite_args)
-    except KeyboardInterrupt:
-        _interrupted(version, _variant, "while running the attack suite", _newest_manifest(start_ts),
+    except KeyboardInterrupt as e:
+        _interrupted(version, _variant, "while running the attack suite", getattr(e, "manifest", None),
                      junit, summary_md)
 
     if manifest is None:

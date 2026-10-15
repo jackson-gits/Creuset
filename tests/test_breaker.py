@@ -131,13 +131,47 @@ def test_a_valid_pass_exits_0(tmp_path):
     assert result.exit_code == 0
 
 
-def test_the_gate_still_scores_a_batch_that_stopped_early(tmp_path, monkeypatch):
-    runs = tmp_path / "runs"
-    monkeypatch.setattr(run_gate, "_RUNS_DIR", runs)
+def _loader(tmp_path, returncode):
+    """Plays attacks/loader.py: makes a batch, names it in --manifest-out, exits `returncode`."""
+    manifest = tmp_path / "runs" / "b" / "manifest.json"
 
-    def loader_that_stopped(cmd):
-        (runs / "b").mkdir(parents=True)
-        (runs / "b" / "manifest.json").write_text("{}", encoding="utf-8")
-        return 3
+    def run(cmd):
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("{}", encoding="utf-8")
+        out = cmd[cmd.index("--manifest-out") + 1]
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(str(manifest))
+        return returncode
+    return run, manifest
+
+
+def test_the_gate_still_scores_a_batch_that_stopped_early(tmp_path, monkeypatch):
+    loader_that_stopped, manifest = _loader(tmp_path, 3)
     monkeypatch.setattr(run_gate, "_child", loader_that_stopped)
-    assert run_gate._run_attack_suite("hardened") == runs / "b" / "manifest.json"
+    assert run_gate._run_attack_suite("hardened") == manifest
+
+
+def test_an_interrupted_loader_tells_the_gate_its_batch(tmp_path, monkeypatch):
+    loader_that_was_stopped, manifest = _loader(tmp_path, 130)
+    monkeypatch.setattr(run_gate, "_child", loader_that_was_stopped)
+    with pytest.raises(run_gate.SuiteInterrupted) as stop:
+        run_gate._run_attack_suite("hardened")
+    assert stop.value.manifest == manifest
+
+
+def test_a_loader_that_names_no_batch_is_a_failed_suite(monkeypatch):
+    monkeypatch.setattr(run_gate, "_child", lambda cmd: 0)
+    assert run_gate._run_attack_suite("hardened") is None
+
+
+def test_the_loader_names_its_batch_before_the_first_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(loader, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(loader, "image_id", lambda image: None)
+    out = tmp_path / "out" / "manifest-path"
+    seen = []
+    monkeypatch.setattr(loader, "run_case", lambda *a, **k: seen.append(out.read_text(encoding="utf-8"))
+                        or dict(DONE))
+    lib = tmp_path / "lib.yaml"
+    lib.write_text(yaml.safe_dump({"cases": CASES[:1]}), encoding="utf-8")
+    manifest_path = loader.run_suite(CASES[:1], "hardened", lib, workers=1, manifest_out=out)
+    assert seen == [str(manifest_path.resolve())]

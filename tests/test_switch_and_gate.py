@@ -363,12 +363,11 @@ def test_tested_content_needs_one_content_across_the_batch(tmp_path):
 def test_an_interrupted_suite_is_no_verdict_and_names_the_batch_to_resume(gate_env, monkeypatch, tmp_path):
     logs, calls = gate_env
     runs = tmp_path / "runs"
-    monkeypatch.setattr(run_gate, "_RUNS_DIR", runs)
 
     def interrupted(*a, **k):
         (runs / "b1").mkdir(parents=True)
         (runs / "b1" / "manifest.json").write_text("{}", encoding="utf-8")   # the loader writes it up front
-        raise KeyboardInterrupt
+        raise run_gate.SuiteInterrupted(runs / "b1" / "manifest.json")
     monkeypatch.setattr(run_gate, "_run_attack_suite", interrupted)
     result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--skip-model-judge"])
     assert result.exit_code == 130 and calls["deploy"] == []

@@ -407,6 +407,15 @@ def write_json(path: Path, data: Any) -> None:
             time.sleep(0.1 * (attempt + 1))
 
 
+def _announce(out: Path, manifest_path: Path) -> None:
+    """
+    Tell a caller (the gate) which batch this is, as soon as it exists, so it
+    never has to guess from file times: an interrupted run reports it too.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(str(manifest_path.resolve()), encoding="utf-8")
+
+
 @contextmanager
 def _recording_signals(state: Dict[str, str]) -> Iterator[None]:
     """
@@ -623,6 +632,7 @@ def run_suite(
     subject: Optional[Subject] = None,
     repeat: int = 1,
     tags: Optional[List[str]] = None,
+    manifest_out: Optional[Path] = None,
 ) -> Path:
     """
     Run `cases` in parallel sandbox containers, save transcripts + manifest.
@@ -676,6 +686,8 @@ def run_suite(
     # transcripts nothing can finish.
     manifest_path = batch_dir / "manifest.json"
     write_json(manifest_path, manifest)
+    if manifest_out:
+        _announce(manifest_out, manifest_path)
     stopped: Dict[str, Any] = {}
     entries = _execute_cases(runs, variant, batch_dir, workers, on_result,
                              f"[cyan]{variant}[/cyan] × {library.stem}"
@@ -989,6 +1001,9 @@ def main(
     category: Optional[List[str]] = typer.Option(None, help="Only these categories (repeatable)."),
     cases: Optional[str] = typer.Option(None, help="Comma-separated case IDs to run."),
     tag: Optional[List[str]] = typer.Option(None, "--tag", help="Only cases with this tag (repeatable: any of them)."),
+    manifest_out: Optional[Path] = typer.Option(None, "--manifest-out", metavar="FILE",
+                                                help="Write the batch's manifest path to FILE as soon as the batch "
+                                                     "exists (for scripts; the gate uses it)."),
     workers: int = typer.Option(int(os.getenv("GATE_WORKERS", "2")), help="Parallel sandbox containers."),
     repeat: int = typer.Option(1, "--repeat", min=1, max=MAX_REPEAT,
                                help="Run every case this many times; a case FAILs if any run does. "
@@ -1026,6 +1041,8 @@ def main(
         # The variant, library and case selection all come from the batch being
         # resumed; passing them again could only contradict it.
         batch_dir = resume.parent if resume.name == "manifest.json" else resume
+        if manifest_out:
+            _announce(manifest_out, batch_dir / "manifest.json")
         try:
             manifest_path = resume_suite(
                 batch_dir, workers, redo_empty,
@@ -1099,7 +1116,7 @@ def main(
 
     try:
         manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
-                                  subject=subject, repeat=repeat, tags=tag or None)
+                                  subject=subject, repeat=repeat, tags=tag or None, manifest_out=manifest_out)
     except BatchInterrupted as e:
         _interrupted(e.manifest_path)
     _summarise(manifest_path)

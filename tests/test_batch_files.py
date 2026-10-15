@@ -5,6 +5,7 @@ another machine still scores, still resumes, and says what it was graded against
 
 import json
 import shutil
+import subprocess
 
 import pytest
 import yaml
@@ -39,7 +40,18 @@ def test_a_new_manifest_records_nothing_tied_to_this_machine_but_its_origin(ran)
     assert manifest["library_snapshot"] == "library.yaml"
     assert (manifest_path.parent / "library.yaml").read_bytes() == lib.read_bytes()
     assert manifest["library_sha256"] == batch_files.file_sha256(lib)
-    assert len(manifest["source"]["git_commit"]) == 40 and isinstance(manifest["source"]["dirty"], bool)
+    if _in_a_git_checkout():
+        assert len(manifest["source"]["git_commit"]) == 40 and isinstance(manifest["source"]["dirty"], bool)
+    else:   # a source tarball, or no git installed: unknown, not invented
+        assert manifest["source"] is None
+
+
+def _in_a_git_checkout():
+    try:
+        return subprocess.run(["git", "-C", str(batch_files.ROOT), "rev-parse", "HEAD"],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def test_a_library_in_the_repo_is_recorded_repo_relative():
