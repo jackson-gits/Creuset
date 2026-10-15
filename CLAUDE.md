@@ -412,8 +412,10 @@ The original plan (a 23-workstream audit in 9 waves, written by a cloud session)
 reached GitHub, so this list is reconstructed from the code. Done: the security pass
 (`d0b66d6`), the measurement guard (`cd9aa6f`), wave 1 (`33ae1e0`, merged as PR #1),
 wave 2 (`05b071f`), the docs (`e8ab848`, then this file's trim) and the real-project
-features (`de781ca`..`5e185df`, session 10), all after wave 1 on `claude/oss-wave-2`, none
-pushed yet. Left, roughly in order:
+features (`de781ca`..`5e185df`, session 10), and the port of the cloud line's best ideas
+(`f58c60b`..`1adbc88`, session 11: stale-image refusal, clean stops and resumable batches,
+portable batches, the general breaker and exit 3, remote daemons, `--tag`), all after wave
+1 on `claude/oss-wave-2`, none pushed yet. Left, roughly in order:
 
 1. **Push, and watch CI run for the first time.** Nothing on this branch has run on GitHub:
    not the `sandbox-e2e` job, the action, nor the envsh tests on Linux (those were run in a

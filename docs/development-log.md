@@ -5,6 +5,37 @@ says what changed, what was verified and how, and what was left undone. Results 
 here were current when written; the maintained results are in the
 [README](../README.md#results), and the working notes in [CLAUDE.md](../CLAUDE.md).
 
+- **2026-10-15 (11)**: Ported the best of the cloud session's line
+  (`origin/claude/confident-johnson-a8yszr`, `8f7bb04`) onto `claude/oss-wave-2`, which
+  stays the base; the cloud branch is untouched. Local `main` was reset to `origin/main`:
+  session 10's commits had landed on `main` (a checkout switched branches mid-session),
+  and now live only on `claude/oss-wave-2` (`f58c60b`..`1adbc88`). Each port was rebuilt
+  on this line's design, tested, and run live:
+  - **A bundled image not built from `agent/` is refused** (byte comparison, not file
+    ages; gate exit 2), and an unready sandbox is a rejection, not a FAIL. The measured
+    image differs from today's `agent/` only by `d0b66d6`'s variant-name check.
+  - **Stopping a batch**: the manifest is written before the first run and after every
+    one (a batch killed before its end used to be unresumable: no manifest at all);
+    Ctrl-C / SIGTERM cancel queued runs, remove the batch's labelled containers, keep
+    finished runs, exit 130. Live: Ctrl-Break mid-batch, then `--resume` ran exactly the
+    7 missing runs of 12.
+  - **Portable batches** (relative paths, a `library.yaml` snapshot, the commit), a
+    **breaker for any failure that repeats** (bad key, unknown model, broken image), and
+    **exit 3** from the loader and `score.py` for runs that are not measurements.
+  - **Remote Docker daemons**: scenarios in a named volume, llm-proxy's config baked into
+    `creuset-llm-proxy`. Proven on a docker:27-dind daemon: bind fails every case, the
+    volume passes, the isolation probe holds.
+  - `--tag` selection; `score.py` refuses an unconfigured judge up front.
+  - **Found on the way**: the loader's breaker had no tests and was checked on the main
+    thread, so fast failures outran it (now fed by the workers). This checkout's
+    `core.autocrlf` had put CRLF into `agent/` prompts and code, and so into images built
+    here; the new byte check caught it, and image inputs are pinned to LF. My own patch
+    scripts used `Path.write_text`, which writes CRLF on Windows; harmless in git (it
+    stores LF) but it is how some of those files got CRLF.
+  - Not pushed. Docker: `creuset-agent`, `creuset-mock-services`, the example images and
+    the new `creuset-llm-proxy` rebuilt from LF; llm-proxy and mock-services recreated.
+    The slots and the router were left as they were (the doctor warns that they predate
+    their images). No agent or judge quota spent.
 - **2026-10-14 (10)**: "Dig deeper and make it usable in real projects." Started from what
   a team adopting it would actually hit, confirmed each gap in the code, then closed them in
   order, each with tests and a live run (commits `de781ca`..`5e185df`, local):
