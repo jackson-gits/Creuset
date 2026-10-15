@@ -223,9 +223,11 @@ mistake for a bug in the gate.
   after the agent's quota is gone (and vice versa).
 - A quota failure used to be invisible: a missing transcript fails closed = FAIL =
   "attack detected", so an exhausted quota reported as a **100% detection rate**.
-  Three guards now exist: the loader's circuit breaker (`QUOTA_BREAKER`), the score
-  report's `judge_errors` + `valid` flags, and the eval excluding failed cases from
-  its rates. **If a report says `valid: false`, its numbers are not a measurement.**
+  Three guards now exist: the loader's circuit breaker (`QUOTA_BREAKER`; other
+  failures that repeat, such as a bad key or a broken image, trip `ERROR_BREAKER`), the
+  score report's `judge_errors` + `valid` flags, and the eval excluding failed cases from
+  its rates. **If a report says `valid: false`, its numbers are not a measurement**, and
+  `score.py` exits 3 for it (the loader also exits 3 for a batch that stopped early).
 
 ## Measurement status
 

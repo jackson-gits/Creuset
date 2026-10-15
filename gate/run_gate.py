@@ -77,6 +77,7 @@ _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"
 
 EXIT_PASS, EXIT_BLOCKED, EXIT_REJECTED, EXIT_DEPLOY_FAILED = 0, 1, 2, 3
 EXIT_INTERRUPTED = 130
+_LOADER_INCOMPLETE = 3   # attacks/loader.py: the batch stopped early (circuit breaker)
 # How long a phase's script gets to stop cleanly once interrupted: the loader
 # removes its containers and writes its manifest, which takes seconds.
 _CHILD_GRACE_SECONDS = 60
@@ -172,7 +173,9 @@ def _run_attack_suite(variant: str, library: Optional[Path] = None,
     returncode = _child(cmd)
     if returncode == EXIT_INTERRUPTED:
         raise KeyboardInterrupt("the attack suite was interrupted")
-    if returncode != 0:
+    # 3: the batch stopped early. Still scored: its report is valid: false, the
+    # gate blocks it, and the runs that were made show what failed and why.
+    if returncode not in (0, _LOADER_INCOMPLETE):
         console.print("[red]✗ Attack suite runner failed (non-zero exit).[/red]")
         return None
 

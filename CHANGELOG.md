@@ -166,6 +166,16 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **Exit codes said "fine" about runs that were not measurements**: the loader
+  exited 0 when the circuit breaker had cut a batch short, and `score.py`
+  exited 0 for a PASS whose report was `valid: false` (a few fail-closed
+  harness failures can still meet every threshold). Both now exit 3. The gate
+  still scores a batch that stopped early, so its record shows what ran.
+- **The circuit breaker only knew about quota**: a wrong key, an unknown model,
+  an unreachable gateway or an image that does not honour the contract failed
+  every case, one by one, to the end. It now trips on three consecutive runs
+  failing the same way (`ERROR_BREAKER`), names the class and its fix, and is
+  fed by the workers themselves, so fast failures cannot outrun it.
 - **A batch killed before its end could not be resumed**: the manifest was
   written only when a batch finished, so Ctrl-C, a closed terminal or a
   cancelled CI job left transcripts that `--resume` refused ("nothing to

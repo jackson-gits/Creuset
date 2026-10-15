@@ -30,7 +30,10 @@ Usage:
   python judge/score.py --transcript-dir <dir> --library my_cases.yaml
 
 Exit code: 0 gate PASS, 1 gate FAIL, 2 nothing could be scored (bad arguments,
-no matching cases).
+no matching cases), 3 not a measurement (`valid: false`, whatever the verdict:
+a fail-closed harness failure can still leave every threshold met).
+EXIT_NOT_MEASURED is checked before the verdict, so a script that only reads the
+exit code cannot quote an invalid PASS.
 """
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ import yaml
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
+
+EXIT_NOT_MEASURED = 3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from batch_files import file_sha256, library_drift, library_path, transcript_path  # noqa: E402
@@ -534,6 +539,8 @@ def main(
         summary_md.parent.mkdir(parents=True, exist_ok=True)
         summary_md.write_text(markdown_summary(report), encoding="utf-8")
         console.print(f"[bold]Summary:[/bold] {summary_md}")
+    if not report["valid"]:
+        raise typer.Exit(code=EXIT_NOT_MEASURED)
     raise typer.Exit(code=0 if report["gate_verdict"] == "PASS" else 1)
 
 

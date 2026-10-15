@@ -26,6 +26,11 @@ Usage:
   # Your own agent image and library (see sandbox/contract.py, schemas/library.v1.json)
   python attacks/loader.py --library my_cases.yaml --agent-image my-agent:1.4 --variant v1.4
 
+Exit codes: 0 every run made, 1 bad library or nothing selected, 2 refused
+before running (bad arguments, sandbox not ready), 3 the batch stopped early
+(circuit breaker: the runs it made are kept, finish it with --resume),
+130 interrupted.
+
 Output (one folder per batch):
   logs/runs/<timestamp>_<variant>_<library>/
       <ID>.json          one transcript per case
@@ -241,6 +246,9 @@ def select_cases(cases: List[Dict[str, Any]], categories: Optional[List[str]] = 
 
 # Consecutive rate-limit failures that mean "the quota is gone, stop trying".
 _QUOTA_BREAKER = int(os.getenv("QUOTA_BREAKER", "3"))
+# The same for the other failures that do not go away by themselves.
+_ERROR_BREAKER = int(os.getenv("ERROR_BREAKER", "3"))
+EXIT_INCOMPLETE = 3
 
 
 def _is_quota_error(transcript: Dict[str, Any]) -> bool:
@@ -249,6 +257,80 @@ def _is_quota_error(transcript: Dict[str, Any]) -> bool:
         return False
     err = str(transcript.get("error") or "").lower()
     return "ratelimit" in err or "rate_limit" in err or "429" in err
+
+
+# Failures that fail every remaining case the same way, from the error text
+# (an SDK's exact phrasing, not bare numbers: a traceback carries line numbers).
+_ERROR_CLASSES: Tuple[Tuple[str, "re.Pattern[str]", str], ...] = (
+    ("auth", re.compile(r"Error code: 401\b|AuthenticationError|invalid_api_key|401 Unauthorized"),
+     "The LLM provider rejected the API key (HTTP 401). Check LLM_API_KEY in .env (llm-proxy "
+     "injects it) and recreate llm-proxy."),
+    ("not_found", re.compile(r"Error code: 404\b|NotFoundError|model_not_found"),
+     "The provider does not know the model or the endpoint (HTTP 404). Check AGENT_MODEL and "
+     "AGENT_API_BASE."),
+    ("forbidden", re.compile(r"Error code: 403\b|PermissionDeniedError"),
+     "The request was refused (HTTP 403): by llm-proxy when the path is not on its allowlist "
+     "(LLM_ALLOWED_ENDPOINTS), or by the provider."),
+    ("connection", re.compile(r"APIConnectionError|APITimeoutError|Connection error|ConnectError|"
+                              r"Connection refused|Name or service not known|getaddrinfo failed|"
+                              r"Temporary failure in name resolution|CERTIFICATE_VERIFY_FAILED|"
+                              r"Error code: 50[234]\b"),
+     "The LLM endpoint could not be reached (connection, TLS or gateway error). Check that "
+     "llm-proxy is healthy (scripts/doctor.py --online) and LLM_UPSTREAM_HOST."),
+)
+# What a broken agent image looks like: the same harness-side failure on every
+# case, whatever the case says.
+_STATUS_HINTS = {
+    "parse_error": "The agent printed no transcript the harness could read. Check that the image "
+                   "honours sandbox/contract.py (one JSON object on stdout).",
+    "contract_error": "The agent's transcripts break schemas/transcript.v1.json (see each one's "
+                      "contract_violations).",
+    "container_error": "The agent's container failed (see each transcript's exit_code and stderr).",
+    "harness_error": "The harness could not run the case (see each transcript's error).",
+    "timeout": "Runs exceed SANDBOX_TIMEOUT_SECONDS. A slow provider, or an agent that never ends.",
+}
+_ERROR_HINTS = {**{name: hint for name, _, hint in _ERROR_CLASSES}, **_STATUS_HINTS}
+
+
+def classify_error(transcript: Dict[str, Any]) -> Optional[str]:
+    """
+    The class of failure a run ended in: quota, auth, not_found, forbidden,
+    connection, or a harness-side status (parse_error, contract_error, ...).
+    None for a completed run, or a failure the breaker cannot vouch for.
+    """
+    status = transcript.get("status")
+    if status == "completed":
+        return None
+    if _is_quota_error(transcript):
+        return "quota"
+    err = str(transcript.get("error") or "") + "\n" + str(transcript.get("stderr") or "")
+    for name, pattern, _ in _ERROR_CLASSES:
+        if pattern.search(err):
+            return name
+    return status if status in _STATUS_HINTS else None
+
+
+class _Breaker:
+    """
+    Trips on consecutive failed runs of one class. Once the quota is gone, the
+    key is wrong or the image is broken, every remaining case fails identically:
+    that wastes the run AND reads as a perfect detection rate downstream (the
+    judge fails a failed case closed). Quota has its own threshold.
+    """
+
+    def __init__(self) -> None:
+        self.error_class: Optional[str] = None
+        self.count = 0
+
+    def record(self, transcript: Dict[str, Any]) -> Optional[str]:
+        """The class that just tripped the breaker, or None."""
+        cls = classify_error(transcript)
+        if cls is None:
+            self.error_class, self.count = None, 0
+            return None
+        self.count = self.count + 1 if cls == self.error_class else 1
+        self.error_class = cls
+        return cls if self.count >= (_QUOTA_BREAKER if cls == "quota" else _ERROR_BREAKER) else None
 
 MAX_REPEAT = 50
 Run = Tuple[Dict[str, Any], int]   # (case, sample number from 1)
@@ -394,6 +476,11 @@ def _execute_cases(
     entries: List[Dict[str, Any]] = []
     signals: Dict[str, str] = {}
     stop = threading.Event()
+    # The breaker is fed by the workers themselves, under this lock: a worker
+    # whose run trips it stops the batch before the next queued run can start,
+    # however fast the runs fail (a broken image fails in a second).
+    breaker = _Breaker()
+    lock = threading.Lock()
 
     def one(case: Dict[str, Any], sample: int) -> Optional[Tuple[Dict[str, Any], Path]]:
         # Written HERE, in the worker: a run that finishes while the main thread
@@ -408,6 +495,12 @@ def _execute_cases(
                           "service_audit": None, "output": ""}
         if stop.is_set() and transcript.get("status") != "completed":
             return None   # cut off by the stop: not a result
+        with lock:
+            tripped = breaker.record(transcript)
+            if tripped and not stopped:
+                stopped.update({"reason": "circuit_breaker", "error_class": tripped,
+                                "consecutive": breaker.count})
+                stop.set()
         if repeat > 1:
             transcript["sample"] = sample   # harness-owned: which of the N runs this was
         path = batch_dir / f"{run_key(case['id'], sample)}.json"
@@ -456,9 +549,10 @@ def _execute_cases(
             return transcript
 
         def interrupt(signal_name: str) -> None:
-            stopped.clear()
-            stopped.update({"reason": "interrupted", "signal": signal_name})
-            stop.set()
+            with lock:
+                stopped.clear()
+                stopped.update({"reason": "interrupted", "signal": signal_name})
+                stop.set()
             pool.shutdown(wait=False, cancel_futures=True)
             progress.console.print(f"[bold yellow]⏹ {signal_name}: stopping the batch.[/bold yellow] "
                                    "Queued runs will not start; removing this batch's containers.")
@@ -470,22 +564,10 @@ def _execute_cases(
             for run in runs:
                 futures[pool.submit(one, *run)] = run
             pending = set(futures)
-            consecutive_quota_errors = 0
-            while pending and not stopped:
+            while pending and not stop.is_set():
                 done, pending = wait(pending, timeout=_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 for fut in sorted(done, key=list(futures).index):
-                    transcript = record(fut, live=True)
-                    if transcript is None:
-                        continue
-                    # Circuit breaker. Once the provider's quota is gone every
-                    # remaining case fails identically, which wastes the rest of
-                    # the run AND looks like a perfect detection rate downstream
-                    # (the judge fails a missing transcript closed). Stop and say why.
-                    consecutive_quota_errors = consecutive_quota_errors + 1 if _is_quota_error(transcript) else 0
-                    if consecutive_quota_errors >= _QUOTA_BREAKER and not stopped:
-                        stopped.update({"reason": "quota", "consecutive": consecutive_quota_errors})
-                        stop.set()
-                        pool.shutdown(wait=False, cancel_futures=True)
+                    record(fut, live=True)
                 if signals.get("signal") and not stopped:
                     interrupt(signals["signal"])
         except KeyboardInterrupt:   # off the main thread no handler records it
@@ -509,14 +591,17 @@ def _execute_cases(
             for fut in sorted(done, key=list(futures).index):
                 record(fut, live=False)
 
-        if stopped.get("reason") == "quota":
+        if stopped.get("reason") == "circuit_breaker":
+            cls = stopped["error_class"]
+            what = ("provider rate-limit failures" if cls == "quota"
+                    else f"runs failed the same way ({cls})")
+            fix = ("once the quota resets" if cls == "quota"
+                   else f"once that is fixed. {_ERROR_HINTS.get(cls, '')}")
             progress.console.print(
-                f"[bold red]⛔ Aborting batch: {stopped['consecutive']} consecutive "
-                f"provider rate-limit failures.[/bold red] The remaining "
-                f"{len(runs) - len(entries)} run(s) were not made - results from this "
+                f"[bold red]⛔ Aborting batch: {stopped['consecutive']} consecutive {what}.[/bold red] "
+                f"The remaining {len(runs) - len(entries)} run(s) were not made - results from this "
                 f"batch are incomplete, not a measurement. Finish it with "
-                f"[bold]--resume {batch_dir}[/bold] once the quota resets; every case "
-                f"that did complete is kept.")
+                f"[bold]--resume {batch_dir}[/bold] {fix} Every run that did complete is kept.")
 
     entries.sort(key=lambda e: (e["id"], int(e.get("sample", 1))))
     return entries
@@ -593,7 +678,7 @@ def run_suite(
                              stopped=stopped)
     manifest.update({"complete": len(entries) == len(cases) * repeat, "cases": entries})
     if stopped:
-        manifest["stopped"] = stopped   # why it is incomplete: "quota" or "interrupted"
+        manifest["stopped"] = stopped   # why it is incomplete: "circuit_breaker" or "interrupted"
     write_json(manifest_path, manifest)
     if stopped.get("reason") == "interrupted":
         raise BatchInterrupted(manifest_path)
@@ -947,7 +1032,7 @@ def main(
         except BatchInterrupted as e:
             _interrupted(e.manifest_path)
         _summarise(manifest_path)
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=_exit_code(manifest_path))
 
     try:
         raw = load_library_doc(library)
@@ -1004,6 +1089,13 @@ def main(
     except BatchInterrupted as e:
         _interrupted(e.manifest_path)
     _summarise(manifest_path)
+    raise typer.Exit(code=_exit_code(manifest_path))
+
+
+def _exit_code(manifest_path: Path) -> int:
+    """0 when every run was made, EXIT_INCOMPLETE when the batch stopped early."""
+    complete = json.loads(manifest_path.read_text(encoding="utf-8")).get("complete")
+    return 0 if complete else EXIT_INCOMPLETE
 
 
 def _interrupted(manifest_path: Path) -> None:

@@ -43,7 +43,7 @@ harness sets:
 | `source` | `{git_commit, dirty}`: the Creuset commit the batch ran from, and whether tracked files differed from it. |
 | `agent_model` | `AGENT_MODEL` at the time of the run. |
 | `case_count`, `repeat`, `complete` | Cases, and runs per case (`--repeat`). `complete: false` while the batch runs (the manifest is written before the first run and after every one) and for good when it stopped early: the missing runs are unmade, not passed. |
-| `stopped` | Why an incomplete batch stopped: `{reason: "quota", consecutive}` (the circuit breaker) or `{reason: "interrupted", signal, containers_removed}` (Ctrl-C, SIGTERM). Absent when it ran to the end; a resume that finishes the batch removes it. |
+| `stopped` | Why an incomplete batch stopped: `{reason: "circuit_breaker", error_class, consecutive}` or `{reason: "interrupted", signal, containers_removed}` (Ctrl-C, SIGTERM). The breaker trips on consecutive runs failing the same way: `quota` (`QUOTA_BREAKER`, default 3), or `auth`, `not_found`, `forbidden`, `connection`, `parse_error`, `contract_error`, `container_error`, `harness_error`, `timeout` (`ERROR_BREAKER`, default 3). Absent when the batch ran to the end; a resume that finishes it removes it. |
 | `sandbox` | The box the containers ran in: memory, CPUs, process limit, writable directories. |
 | `cases[]` | `{id, sample, status, transcript, agent_model, elapsed_seconds, agent_image_id}`, one per run (`sample` from 2 on; run 2 of PI-001 is `PI-001.r2.json`). `transcript` is relative to the batch folder (older batches recorded absolute paths, which still resolve, or by file name inside a moved batch). A resumed batch can never hide a change of model or image. |
 | `resumes[]` | One entry per `--resume`: what was re-run and why, and `stopped` if that resume was stopped too. |
@@ -110,7 +110,13 @@ The rule checks, in order:
 | `slot` | The slot staged for a deploy: always the one that was not live. |
 | `score_report` | The full score report. |
 
-The process exit code mirrors the decision: 0 for `DEPLOYED` or
+`attacks/loader.py` exits 0 when every run was made (whatever the agent did), 1
+for a bad library, 2 when refused before running, 3 when the batch stopped early,
+and 130 when interrupted. `judge/score.py` exits 0 for PASS, 1 for FAIL, 2 when
+nothing could be scored, and 3 when the report is not `valid`, whatever its
+verdict: a fail-closed harness failure can still leave every threshold met.
+
+The gate's exit code mirrors the decision: 0 for `DEPLOYED` or
 `DRY_RUN_WOULD_DEPLOY`, 1 for `BLOCKED`, 2 for a gate rejected before running
 (its record says why), 3 for `SWITCH_FAILED`, and 130 for a gate interrupted by
 Ctrl-C or SIGTERM (no verdict; its `error` names the batch to `--resume`). A rejection is not a verdict on
