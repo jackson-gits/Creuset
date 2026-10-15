@@ -415,11 +415,13 @@ wave 2 (`05b071f`), the docs (`e8ab848`, then this file's trim) and the real-pro
 features (`de781ca`..`5e185df`, session 10), and the port of the cloud line's best ideas
 (`f58c60b`..`1adbc88`, session 11: stale-image refusal, clean stops and resumable batches,
 portable batches, the general breaker and exit 3, remote daemons, `--tag`), all after wave
-1 on `claude/oss-wave-2`, none pushed yet. Left, roughly in order:
+1 on `claude/oss-wave-2`, pushed on 2026-10-15 as **PR #2**, CI green (both jobs). Left,
+roughly in order:
 
-1. **Push, and watch CI run for the first time.** Nothing on this branch has run on GitHub:
-   not the `sandbox-e2e` job, the action, nor the envsh tests on Linux (those were run in a
-   Linux container by hand). `e23077c` alone has a failing test (fixed in `811bd89`).
+1. **Merge PR #2** (Jackson's call), which also clears the red ✗ PR #1 left on `main` (a
+   3.13-only test API). Before pushing anything else that touches `action.yml`, run the job
+   simulator idea from session 11: one shared `RUNNER_TEMP`, step outputs, upload-artifact's
+   path and name rules. The action's first real run found three bugs a single local run hid.
 2. **An MCP mock**: agents whose tools come from MCP servers still need an adapter. The
    REST mock covers HTTP tools; MCP would need tool schemas in the library.
 3. **Results browser**: shows waived and repeated cases now, but not `subject`,

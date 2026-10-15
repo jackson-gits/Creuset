@@ -32,10 +32,21 @@ here were current when written; the maintained results are in the
     here; the new byte check caught it, and image inputs are pinned to LF. My own patch
     scripts used `Path.write_text`, which writes CRLF on Windows; harmless in git (it
     stores LF) but it is how some of those files got CRLF.
-  - Not pushed. Docker: `creuset-agent`, `creuset-mock-services`, the example images and
-    the new `creuset-llm-proxy` rebuilt from LF; llm-proxy and mock-services recreated.
-    The slots and the router were left as they were (the doctor warns that they predate
-    their images). No agent or judge quota spent.
+  - **First push** ("can I push it to main now?" → branch + PR). Before it, everything CI
+    runs was run locally: lint and the full suite on Linux / Python 3.11 from a clean LF
+    clone (container egress was down, so with wheels fetched on the host and
+    `--network none`), the nginx step and the three `sandbox-e2e` gates. That found three
+    tests failing on Linux only; two exposed the gate guessing its batch from file times,
+    which Linux's coarse mtime clock defeats (now `--manifest-out`, `34880f4`). The CI
+    nginx step now checks the image that ships (`3f1ece9`).
+  - **PR #2**: the unit job passed first time; `sandbox-e2e` failed after a passing gate,
+    on upload-artifact refusing `.../Creuset/./`. Two more bugs were waiting behind it (a
+    duplicate artifact name, one JUnit file shared by every gate). A job-level simulator
+    reproduced all three before the fix (`877d21b`); CI then went green, three artifacts.
+  - Docker: `creuset-agent`, `creuset-mock-services`, the example images and the new
+    `creuset-llm-proxy` rebuilt from LF; llm-proxy and mock-services recreated (and their
+    real key restored after each simulation). The slots and the router were left as they
+    were (the doctor warns that they predate their images). No agent or judge quota spent.
 - **2026-10-14 (10)**: "Dig deeper and make it usable in real projects." Started from what
   a team adopting it would actually hit, confirmed each gap in the code, then closed them in
   order, each with tests and a live run (commits `de781ca`..`5e185df`, local):
