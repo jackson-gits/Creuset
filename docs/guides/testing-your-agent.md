@@ -349,9 +349,10 @@ The gate's exit code is stable:
 
 On GitHub, the gate is one step. This repository is a composite action
 ([`action.yml`](../../action.yml)): it starts the sandbox, proves isolation, runs
-the gate, writes the job summary and a JUnit report, uploads every transcript as
-an artifact, and fails the step if the agent is blocked. Its own CI runs it on
-every push (`sandbox-e2e`).
+the gate, writes the job summary and a JUnit report, uploads that gate's evidence
+(its batch of transcripts, its record and its reports) as an artifact of its own,
+and fails the step if the agent is blocked. A job may use it several times. Its
+own CI runs it three times on every push (`sandbox-e2e`).
 
 ```yaml
 jobs:

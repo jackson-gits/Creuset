@@ -70,9 +70,14 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 - **GitHub Action**: this repository is a composite action (`action.yml`).
   `uses: jackson-gits/Creuset@<sha>` starts the sandbox, proves isolation, runs
   the gate on an image built earlier in the job, writes the job summary and a
-  JUnit report, uploads every transcript, and fails the step when the agent is
-  blocked. Outputs: `verdict`, `valid`, `exit-code`, `junit`, `summary`,
-  `record`. CI's `sandbox-e2e` job now runs the action itself, twice.
+  JUnit report, uploads that gate's batch, record and reports as an artifact of
+  its own, and fails the step when the agent is blocked. Outputs: `verdict`,
+  `valid`, `exit-code`, `junit`, `summary`, `record`. CI's `sandbox-e2e` job
+  runs the action itself, three times. Its first run on GitHub found three bugs
+  a single local run could not: upload-artifact refused the `.../repo/./` path
+  `uses: ./` gives, two gates of one variant collided on the artifact name, and
+  every gate wrote its JUnit to the same file, so a later gate overwrote an
+  earlier one's.
 - **CI formats**: `--junit-xml` and `--summary-md` on `score.py` and the gate;
   under GitHub Actions the gate also writes the job summary. Cases that never
   completed are JUnit *errors*, not failures, and everything published shows

@@ -151,8 +151,17 @@ runs:
       run: |
         set -u
         in_workspace() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$GITHUB_WORKSPACE" "$1" ;; esac; }
-        out="$RUNNER_TEMP/creuset"
-        mkdir -p "$out"
+        # One folder per invocation: a job that gates twice must not have the
+        # second run overwrite the first one's reports.
+        out="$(mktemp -d "$RUNNER_TEMP/creuset-XXXXXX")"
+        # Physical paths: with `uses: ./` the action path is ".../repo/./", and
+        # upload-artifact refuses any path with a "." segment. Written first, so
+        # the upload step has them however this step ends.
+        logs="$(pwd -P)/logs"
+        {
+          echo "artifact=creuset-${INPUT_VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${out##*-}"
+          echo "reports=$out"
+        } >> "$GITHUB_OUTPUT"
         args=(--version "$INPUT_VERSION" --variant "$INPUT_VARIANT" --agent-image "$INPUT_AGENT_IMAGE"
               --library "$(in_workspace "$INPUT_LIBRARY")" --repeat "$INPUT_REPEAT" --dry-run
               --junit-xml "$out/junit.xml" --summary-md "$out/summary.md")
@@ -168,14 +177,16 @@ runs:
         code=0
         python gate/run_gate.py "${args[@]}" || code=$?
 
-        record="$(ls -t "$PWD"/logs/gate_runs/gate_*.json 2>/dev/null | head -n 1 || true)"
+        record="$(ls -t "$logs"/gate_runs/gate_*.json 2>/dev/null | head -n 1 || true)"
         python - "$record" >> "$GITHUB_OUTPUT" <<'PY'
-        import json, sys
+        import json, os, sys
         record = json.load(open(sys.argv[1], encoding="utf-8")) if sys.argv[1] else {}
         report = record.get("score_report") or {}
         print(f"verdict={record.get('verdict', 'FAIL')}")
         print(f"decision={record.get('decision', 'BLOCKED')}")
         print(f"valid={str(bool(report.get('valid'))).lower()}")
+        # This gate's own batch, for the artifact (empty if it was refused up front).
+        print(f"batch={os.path.dirname(record['manifest']) if record.get('manifest') else ''}")
         PY
         {
           echo "exit-code=$code"
@@ -192,8 +203,11 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: creuset-${{ inputs.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+        # This invocation's evidence only: its batch (transcripts, manifest,
+        # library snapshot), its gate record, its JUnit and summary.
+        name: ${{ steps.gate.outputs.artifact || format('creuset-{0}-{1}', inputs.variant, github.run_id) }}
         path: |
-          ${{ github.action_path }}/logs/runs/
-          ${{ github.action_path }}/logs/gate_runs/
+          ${{ steps.gate.outputs.batch }}
+          ${{ steps.gate.outputs.record }}
+          ${{ steps.gate.outputs.reports }}
         if-no-files-found: ignore
