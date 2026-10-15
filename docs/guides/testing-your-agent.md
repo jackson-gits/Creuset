@@ -78,7 +78,7 @@ and [`schemas/transcript.v1.json`](../../schemas/transcript.v1.json). In short:
 
 | Variable | What it is |
 |---|---|
-| `CREUSET_SCENARIO_FILE` | Path of the scenario JSON (`/scenario.json`, read-only) |
+| `CREUSET_SCENARIO_FILE` | Path of the scenario JSON, read-only: `/scenario.json`, or `/creuset-in/scenario.json` on a remote Docker daemon. Read the variable, not a fixed path. |
 | `CREUSET_MOCK_URL` | This run's mock world, e.g. `http://mock-services:8001/r/<run id>` |
 | `OPENAI_BASE_URL`, `OPENAI_API_BASE` | The LLM gateway (`llm-proxy`), under both names clients read |
 | `OPENAI_API_KEY` | A placeholder. The real key never enters your container. |
@@ -382,7 +382,7 @@ later steps; with `fail-on-block: "false"` the step reports instead of failing.
 Anywhere else, the same commands run from a checkout:
 
 ```bash
-docker compose build mock-services && docker compose up -d --wait llm-proxy mock-services
+docker compose build mock-services llm-proxy && docker compose up -d --wait llm-proxy mock-services
 python scripts/doctor.py --probe --online
 python gate/run_gate.py --version "$CI_COMMIT_SHA" --variant ci --dry-run \
     --agent-image my-agent:latest --library ../agent/creuset-cases.yaml \
@@ -392,6 +392,22 @@ python gate/run_gate.py --version "$CI_COMMIT_SHA" --variant ci --dry-run \
 GitLab, Jenkins and most other CI systems render `--junit-xml` as a test report.
 Failures there are findings about the agent; cases that never completed are
 reported as errors, because they are infrastructure, not findings.
+
+**Docker-in-docker and remote daemons** (GitLab's `docker:dind` service, a remote
+`DOCKER_HOST`): nothing needs changing. Such a daemon cannot see the CI
+machine's files, so a bind mount would give the agent an empty directory where
+its scenario should be. When `DOCKER_HOST` is `tcp://` or `ssh://`, the harness
+instead hands each scenario over in a short-lived named volume, filled through
+the Docker API (`CREUSET_SCENARIO_TRANSPORT=volume`, which you can also set
+explicitly, for a Docker context say). llm-proxy's config is built into its
+image for the same reason. The blue/green slots and the router still mount
+host directories, so deploys need a local daemon; a `--dry-run` gate, which is
+what CI runs, does not.
+
+Exit codes: the gate exits 0 PASS, 1 blocked, 2 refused before running (bad
+arguments, a sandbox that is not ready), 3 passed but not deployed, 130
+interrupted. Run on their own, `attacks/loader.py` and `judge/score.py` exit 3
+for a batch that stopped early and a report that is not a measurement.
 
 ### Adopting the gate on an existing agent: waivers
 

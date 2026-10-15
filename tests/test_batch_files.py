@@ -114,3 +114,11 @@ def test_a_snapshot_may_not_point_outside_its_batch(tmp_path):
 def test_without_path_or_snapshot_the_library_is_missing(tmp_path):
     with pytest.raises(FileNotFoundError, match="no snapshot"):
         batch_files.library_path({"library": str(tmp_path / "gone.yaml")}, tmp_path)
+
+
+def test_a_crlf_checkout_of_the_same_library_is_the_same_library(tmp_path):
+    lf, crlf = tmp_path / "lf.yaml", tmp_path / "crlf.yaml"
+    lf.write_bytes(b"cases:\n  - id: EX-001\n")
+    crlf.write_bytes(b"cases:\r\n  - id: EX-001\r\n")
+    assert batch_files.file_sha256(lf) == batch_files.file_sha256(crlf)
+    assert batch_files.library_drift({"library_sha256": batch_files.file_sha256(lf)}, crlf) is None

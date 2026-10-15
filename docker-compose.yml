@@ -97,7 +97,11 @@ services:
 
   # ── LLM egress gateway ────────────────────────────────────────────────────
   llm-proxy:
-    image: nginx:1.31-alpine
+    # nginx:1.31-alpine with the config below baked in (deploy/llm-proxy/Dockerfile),
+    # so it also works on a Docker daemon that cannot see this machine's files.
+    build:
+      context: ./deploy/llm-proxy
+    image: creuset-llm-proxy:latest
     container_name: ${CREUSET_PREFIX:-}llm-proxy
     environment:
       LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env}
@@ -113,11 +117,6 @@ services:
       LLM_AUTH_HEADER: ${LLM_AUTH_HEADER:-Authorization}
       LLM_AUTH_PREFIX: ${LLM_AUTH_PREFIX:-}
       LLM_PROXY_EXTRA_CA_FILE: ${LLM_PROXY_EXTRA_CA_FILE:-}
-    volumes:
-      - ./deploy/llm-proxy:/etc/nginx/templates:ro
-      # Sourced by the image's entrypoint before the template is rendered. If it
-      # is missing, nginx refuses the config rather than start unvalidated.
-      - ./deploy/llm-proxy/05-creuset-validate.envsh:/docker-entrypoint.d/05-creuset-validate.envsh:ro
     # The one container holding the real key gets the tightest box: read-only
     # root (the rendered config, cache and pid file live in tmpfs) and only the
     # three capabilities the nginx master needs to hand workers to `nginx`.

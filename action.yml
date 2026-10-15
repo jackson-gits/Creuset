@@ -118,7 +118,7 @@ runs:
         MOCK_STRICT_RUNS: "1"
         CREUSET_AGENT_IMAGE: ${{ inputs.agent-image }}
       run: |
-        docker compose build --quiet mock-services
+        docker compose build --quiet mock-services llm-proxy
         docker compose up -d --wait llm-proxy mock-services
         python scripts/doctor.py --probe
 

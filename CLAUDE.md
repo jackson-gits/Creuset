@@ -36,7 +36,8 @@ gate/run_gate.py --version X [--variant V] [--skip-model-judge] [--dry-run]
  │   └─ sandbox/run_test.py :: run_case(case, variant, subject)   (imported, not a subprocess)
  │       ├─ docker exec mock-services … POST /runs/<run>/init   (the HARNESS builds the world)
  │       └─ docker run --rm --network creuset-net --read-only --cap-drop ALL ...
- │             -v agent_scenario(case):/scenario.json:ro          (no answer key)
+ │             -v agent_scenario(case):/scenario.json:ro          (no answer key; a named
+ │                volume at /creuset-in on a tcp:// or ssh:// DOCKER_HOST: CREUSET_SCENARIO_TRANSPORT)
  │             <image ID> [--scenario-file /scenario.json --variant V]   (bundled only)
  │           └─ agent/run_agent.py, or any contract image → JSON transcript on stdout
  │   → logs/runs/<ts>_<variant>_<library>/{<ID>.json, manifest.json}   (image ID recorded)
@@ -158,8 +159,11 @@ Other entry points:
   placeholder, so a hijacked agent has no credential to exfiltrate.
   Never print or commit `.env`.
 - **llm-proxy** is nginx (`nginx:1.31-alpine`) with `deploy/llm-proxy/default.conf.template`
-  (envsubst at start): allowlists the OpenAI-compatible paths of one upstream host, injects
-  the real key, and resolves DNS at runtime — no hard-coded IPs. Everything else → 403.
+  (envsubst at start), both baked into `creuset-llm-proxy:latest` by
+  `deploy/llm-proxy/Dockerfile` (no host mounts, so it runs on a remote daemon too:
+  **`docker compose build llm-proxy` after editing the template or the envsh**):
+  allowlists the OpenAI-compatible paths of one upstream host, injects the real key, and
+  resolves DNS at runtime — no hard-coded IPs. Everything else → 403.
   It **verifies the upstream certificate** (`proxy_ssl_verify on` — nginx's default is off)
   and forwards **`$uri`, not the raw request line**: the allowlist matches the normalised
   path, so forwarding the raw one let `/openai/v1/files/..%2F..%2Fv1/models` through to the
@@ -175,6 +179,12 @@ Other entry points:
   dual-homed onto `creuset-edge`. `scripts/doctor.py --probe` (or `sandbox/run_test.py
   --check`) proves it empirically: gateway reachable, other paths 403, no internet TCP,
   no DNS.
+- **Line endings**: everything copied into a Linux image (`agent/`, `sandbox/mock_services/`,
+  `examples/`, `deploy/router.py`) is pinned to LF in `.gitattributes`. This checkout has
+  `core.autocrlf=true`, which wrote CRLF prompts and code into images built here: a CRLF
+  prompt is a different prompt to the model. The byte check against `agent/` caught it.
+  Python's `Path.write_text` on Windows also writes CRLF, so scripted edits should write bytes
+  or pass `newline="\n"`.
 - Run scripts from repo root with the venv Python (`.venv/Scripts/python.exe`).
   `score.py` now puts its own directory on `sys.path`, so cwd no longer matters.
 - Docker Desktop must be running. `docker compose up -d llm-proxy mock-services` before
@@ -466,7 +476,8 @@ $P gate/run_gate.py --version 0.1 --variant careful --agent-image creuset-exampl
 ```
 
 Rebuild reminders: `docker compose build agent-blue` after anything in `agent/`,
-`docker compose build mock-services` after a fixture change, and
+`docker compose build mock-services` after a fixture change,
+`docker compose build llm-proxy` after `deploy/llm-proxy/*`, and
 `docker compose build router` after `deploy/router.py` — a stale router image was
 why the router ignored its state file for half a session.
 

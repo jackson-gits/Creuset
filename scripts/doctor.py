@@ -276,6 +276,8 @@ def built_images(env: Dict[str, str], root: Path = ROOT) -> List[Tuple[str, str,
          "docker compose build agent-blue", [root / "agent"], not env.get("CREUSET_AGENT_IMAGE")),
         ("creuset-mock-services:latest", "mock-services", "docker compose build mock-services",
          [root / "sandbox" / "mock_services"], True),
+        ("creuset-llm-proxy:latest", "llm-proxy", "docker compose build llm-proxy",
+         [deploy / "llm-proxy"], True),
         ("creuset-router:latest", "router", "docker compose build router",
          [deploy / "router.py", deploy / "Dockerfile.router", deploy / "requirements.router.txt",
           deploy / "constraints.router.txt"], False),
@@ -359,7 +361,7 @@ def check_container_images(env: Dict[str, str]) -> List[Check]:
     prefix = env.get("CREUSET_PREFIX", "")
     agent = env.get("AGENT_IMAGE_TAG") or "creuset-agent:latest"
     expected = [  # (service, container, image it should run, needed for gate runs)
-        ("llm-proxy", f"{prefix}llm-proxy", "nginx:1.31-alpine", True),
+        ("llm-proxy", f"{prefix}llm-proxy", "creuset-llm-proxy:latest", True),
         ("mock-services", f"{prefix}mock-services", "creuset-mock-services:latest", True),
         ("agent-blue", f"{prefix}agent-blue", agent, False),
         ("agent-green", f"{prefix}agent-green", agent, False),

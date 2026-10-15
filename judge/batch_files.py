@@ -53,7 +53,12 @@ def recorded_library(library: Path) -> str:
 
 
 def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """
+    sha256 of a library, line endings normalised: a checkout's CRLF (Windows,
+    core.autocrlf) means nothing to YAML, so a batch run in Linux CI and resumed
+    on Windows must not read as "the library changed".
+    """
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def library_path(manifest: Dict[str, Any], batch_dir: Path) -> Tuple[Path, str]:

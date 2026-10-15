@@ -468,3 +468,85 @@ def test_bad_limits_fail_the_case_closed(docker, monkeypatch):
     t = run_test.run_case(_case(), "broken")
     assert t["status"] == "harness_error" and "CREUSET_SANDBOX_MEMORY" in t["error"]
     assert not any(a[0] == "run" for a in fake.calls)
+
+
+# ── Scenario transport: a daemon that cannot see this machine's files ─────────
+
+@pytest.mark.parametrize("env, expected", [
+    ({}, "bind"),
+    ({"DOCKER_HOST": "unix:///var/run/docker.sock"}, "bind"),
+    ({"DOCKER_HOST": "npipe:////./pipe/docker_engine"}, "bind"),
+    ({"DOCKER_HOST": "tcp://docker:2375"}, "volume"),        # GitLab's docker-in-docker service
+    ({"DOCKER_HOST": "ssh://ci@builder"}, "volume"),
+    ({"DOCKER_HOST": "tcp://docker:2375", "CREUSET_SCENARIO_TRANSPORT": "bind"}, "bind"),
+    ({"CREUSET_SCENARIO_TRANSPORT": "Volume"}, "volume"),
+])
+def test_the_transport_follows_where_the_daemon_is(monkeypatch, env, expected):
+    for name in ("DOCKER_HOST", "CREUSET_SCENARIO_TRANSPORT"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert run_test.scenario_transport() == expected
+
+
+class VolumeDocker(FakeDocker):
+    """FakeDocker for the volume transport: the scenario arrives on the fill helper's stdin."""
+
+    def __init__(self, fill_exit=0, **kwargs):
+        super().__init__(**kwargs)
+        self.fill_exit, self.filled, self.removed = fill_exit, None, []
+
+    def __call__(self, args, timeout=60, input=None):
+        if args[0] == "inspect":
+            self.calls.append(args)
+            return _proc("creuset-mock-services:latest\n")
+        if args[:2] == ["volume", "create"]:
+            self.calls.append(args)
+            return _proc(args[-1] + "\n")
+        if args[:2] == ["volume", "rm"]:
+            self.calls.append(args)
+            self.removed.append(args[-1])
+            return _proc()
+        if args[0] == "run" and "-i" in args:
+            self.calls.append(args)
+            self.filled = json.loads(input)
+            return _proc(returncode=self.fill_exit, stderr="no space left" if self.fill_exit else "")
+        if args[0] == "run":
+            self.calls.append(args)
+            return self.agent
+        return super().__call__(args, timeout, input)
+
+
+def test_the_volume_transport_carries_the_scenario_without_a_host_path(monkeypatch):
+    monkeypatch.setenv("CREUSET_SCENARIO_TRANSPORT", "volume")
+    fake = VolumeDocker(agent_stdout=COMPLETED)
+    monkeypatch.setattr(run_test, "_docker", fake)
+    t = run_test.run_case(_case(), "broken", batch_id="b-1")
+    assert t["status"] == "completed"
+    assert fake.filled == contract.agent_scenario(_case())   # never the answer key
+    fill = next(a for a in fake.calls if a[0] == "run" and "-i" in a)
+    assert fill[fill.index("--network") + 1] == "none" and "creuset.batch=b-1" in fill
+    agent = [a for a in fake.calls if a[0] == "run" and "-i" not in a][0]
+    volume = f"creuset-in-{t['run_id']}".lower()
+    assert agent[agent.index("-v") + 1] == f"{volume}:{contract.SCENARIO_VOLUME_DIR}:ro"
+    assert f"CREUSET_SCENARIO_FILE={contract.SCENARIO_VOLUME_FILE}" in agent
+    assert agent[-4:] == ["--scenario-file", contract.SCENARIO_VOLUME_FILE, "--variant", "broken"]
+    assert fake.removed == [volume]
+
+
+def test_a_volume_that_cannot_be_filled_is_a_harness_error_and_still_removed(monkeypatch):
+    monkeypatch.setenv("CREUSET_SCENARIO_TRANSPORT", "volume")
+    fake = VolumeDocker(fill_exit=1, agent_stdout=COMPLETED)
+    monkeypatch.setattr(run_test, "_docker", fake)
+    t = run_test.run_case(_case(), "broken")
+    assert t["status"] == "harness_error" and "no space left" in t["error"]
+    assert not [a for a in fake.calls if a[0] == "run" and "-i" not in a]   # the agent never ran
+    assert len(fake.removed) == 1
+
+
+def test_an_unknown_transport_is_a_preflight_problem(monkeypatch):
+    monkeypatch.setattr(run_test, "_docker", Stack())
+    monkeypatch.setattr(run_test, "_source_checks", {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("CREUSET_SCENARIO_TRANSPORT", "carrier-pigeon")
+    assert any("CREUSET_SCENARIO_TRANSPORT" in p for p in run_test.preflight())

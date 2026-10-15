@@ -26,6 +26,15 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **Remote Docker daemons** (GitLab's docker-in-docker, a remote
+  `DOCKER_HOST`): the harness hands each scenario over in a short-lived named
+  volume filled through the Docker API instead of a host bind mount, which such
+  a daemon resolves on its own disk (`CREUSET_SCENARIO_TRANSPORT`, `volume` by
+  default for a `tcp://` or `ssh://` `DOCKER_HOST`). llm-proxy's config is
+  built into its own image (`deploy/llm-proxy/Dockerfile`, on the same
+  `nginx:1.31-alpine`) instead of being mounted. Verified on a docker:27-dind
+  daemon: with a bind mount every case fails, with the volume the scripted
+  example passes and the isolation probe holds.
 - **Portable batches**: manifests record transcripts relative to the batch
   folder and the library repo-relative, keep the library's exact bytes beside
   the manifest (`library.yaml`, with its sha256), and record the Creuset commit
@@ -166,6 +175,11 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **Images built on Windows could differ from CI's**: with `core.autocrlf` a
+  checkout wrote CRLF into the agent's prompts and code, so an image built there
+  sent the model different bytes from one built in CI. Everything copied into a
+  Linux image is now pinned to LF. A library's sha256 ignores line endings, so
+  a batch run in CI and resumed on Windows is not refused as edited.
 - **Exit codes said "fine" about runs that were not measurements**: the loader
   exited 0 when the circuit breaker had cut a batch short, and `score.py`
   exited 0 for a PASS whose report was `valid: false` (a few fail-closed

@@ -191,6 +191,10 @@ class Ps:
             return run_test.subprocess.CompletedProcess(args, 0, "\n".join(self.ids), "")
         if args[:2] == ["rm", "-f"]:
             return run_test.subprocess.CompletedProcess(args, 0, "\n".join(args[2:]), "")
+        if args[:2] == ["volume", "ls"]:
+            return run_test.subprocess.CompletedProcess(args, 0, "creuset-in-x\n" if self.ids else "", "")
+        if args[:2] == ["volume", "rm"]:
+            return run_test.subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(args)
 
 
@@ -201,6 +205,9 @@ def test_cleanup_removes_one_batch_by_its_label(monkeypatch):
     ps = fake.calls[0]
     assert f"label={run_test.STACK_LABEL}" in ps and "label=creuset.batch=20261015-abc" in ps
     assert fake.calls[1] == ["rm", "-f", "c1", "c2"]
+    # The volume transport's input volumes go too, by the same labels.
+    assert fake.calls[2] == ["volume", "ls", "-q", *ps[2:]]
+    assert fake.calls[3] == ["volume", "rm", "-f", "creuset-in-x"]
 
 
 @pytest.mark.parametrize("bad", ["", "a b", "-x", "x\ny"])
@@ -214,4 +221,5 @@ def test_without_a_batch_cleanup_is_this_stack_only(monkeypatch):
     fake = Ps([])
     monkeypatch.setattr(run_test, "_docker", fake)
     assert run_test.remove_containers() == 0
-    assert fake.calls == [["ps", "-aq", "--filter", f"label={run_test.STACK_LABEL}"]]
+    assert fake.calls == [["ps", "-aq", "--filter", f"label={run_test.STACK_LABEL}"],
+                          ["volume", "ls", "-q", "--filter", f"label={run_test.STACK_LABEL}"]]

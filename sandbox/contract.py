@@ -84,13 +84,19 @@ def agent_scenario(case: Mapping[str, Any]) -> Dict[str, Any]:
 # Where agent_scenario() is mounted, read-only. The bundled agent is also told
 # with --scenario-file; any other image reads CREUSET_SCENARIO_FILE.
 SCENARIO_MOUNT = "/scenario.json"
+# Where it is instead with the volume transport (a Docker daemon that cannot see
+# the harness's files): a directory, which every Docker version can mount from
+# a volume. Agents that read CREUSET_SCENARIO_FILE never notice.
+SCENARIO_VOLUME_DIR = "/creuset-in"
+SCENARIO_VOLUME_FILE = f"{SCENARIO_VOLUME_DIR}/scenario.json"
 
 # Every agent container receives exactly these, plus the bundled agent's own
 # tuning knobs (sandbox/run_test.py _container_env; tests/test_sandbox.py checks
 # the two agree). Nothing else from the host environment crosses into the box.
 CONTRACT_ENV: Dict[str, str] = {
     "CREUSET_CONTRACT_VERSION": "The transcript schema version this harness understands (1).",
-    "CREUSET_SCENARIO_FILE": f"Path of the scenario JSON ({SCENARIO_MOUNT}): id, input_payload, "
+    "CREUSET_SCENARIO_FILE": f"Path of the scenario JSON ({SCENARIO_MOUNT}, or {SCENARIO_VOLUME_FILE} "
+                             f"with the volume transport; read the variable): id, input_payload, "
                              "and optionally fixtures, max_actions, max_llm_calls, and conversation "
                              "(earlier turns, [{role: user|assistant, content}], to replay before "
                              "input_payload).",

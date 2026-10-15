@@ -169,10 +169,16 @@ def test_compose_passes_the_defaults_the_snapshot_was_rendered_with():
         passed[name] = m.group(2)
     passed["LLM_API_KEY"] = KEY  # `:?` — required, no default
     assert passed == COMPOSE_DEFAULTS
-    # Without this mount nginx refuses the config (see below), so a refactor
-    # that drops it is caught here rather than as a proxy that will not start.
-    assert any(str(v).endswith(":/docker-entrypoint.d/05-creuset-validate.envsh:ro")
-               for v in proxy["volumes"])
+    # The config is baked into the image, not mounted: a remote Docker daemon
+    # resolves a bind mount on its own disk and would start nginx without it.
+    assert proxy["build"]["context"] == "./deploy/llm-proxy" and "volumes" not in proxy
+    dockerfile = (ROOT / "deploy" / "llm-proxy" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM nginx:1.31-alpine" in dockerfile
+    assert "COPY default.conf.template /etc/nginx/templates/default.conf.template" in dockerfile
+    # Without the envsh, or without its exec bit (the entrypoint skips it then),
+    # nginx refuses the config (see below): a refactor that drops either is
+    # caught here rather than as a proxy that will not start.
+    assert "COPY --chmod=0755 05-creuset-validate.envsh /docker-entrypoint.d/05-creuset-validate.envsh" in dockerfile
 
 
 def test_template_uses_only_variables_the_envsh_sets():

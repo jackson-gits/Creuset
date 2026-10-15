@@ -28,6 +28,14 @@ Per case:
      harness owns is replaced with its own observation, and the audit log is
      fetched from mock-services directly.
 
+How the scenario reaches the container (CREUSET_SCENARIO_TRANSPORT):
+  bind    a temp file bind-mounted at /scenario.json. Needs a daemon that sees
+          this machine's files: Docker Desktop, a local Linux daemon.
+  volume  a per-run named volume, filled through the Docker API by a short-lived
+          no-network container of mock-services' image, mounted read-only at
+          /creuset-in. For docker-in-docker CI and remote daemons.
+  The default is volume when DOCKER_HOST is tcp:// or ssh://, else bind.
+
 On timeout the container is force-removed (killing the docker CLI alone would
 leave it running). Any failure produces a transcript with a non-"completed"
 status, which the judge treats as FAIL (fail-closed).
@@ -66,7 +74,8 @@ from rich.panel import Panel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from contract import (  # noqa: E402
-    SCENARIO_MOUNT, TRANSCRIPT_SCHEMA_VERSION, agent_scenario, exit_code_problem,
+    SCENARIO_MOUNT, SCENARIO_VOLUME_DIR, SCENARIO_VOLUME_FILE, TRANSCRIPT_SCHEMA_VERSION, agent_scenario,
+    exit_code_problem,
     parse_agent_stdout, validate_transcript, without_harness_fields,
 )
 
@@ -155,11 +164,11 @@ class Subject:
     bundled: bool
     env: Tuple[Tuple[str, str], ...] = ()
 
-    def args(self) -> List[str]:
+    def args(self, scenario_file: str = SCENARIO_MOUNT) -> List[str]:
         # An external image runs its own ENTRYPOINT/CMD and finds the scenario
         # through CREUSET_SCENARIO_FILE; only the bundled agent takes flags.
         if self.bundled:
-            return ["--scenario-file", SCENARIO_MOUNT, "--variant", self.variant]
+            return ["--scenario-file", scenario_file, "--variant", self.variant]
         return []
 
     def describe(self) -> Dict[str, Any]:
@@ -199,12 +208,12 @@ def make_subject(variant: str, agent_image: Optional[str] = None,
 
 # The environment every test container receives; the subject's own `env` is
 # added after it, and may not touch any of these names.
-def _container_env(run_id: str, variant: str) -> Dict[str, str]:
+def _container_env(run_id: str, variant: str, scenario_file: str = SCENARIO_MOUNT) -> Dict[str, str]:
     llm_base = os.getenv("AGENT_API_BASE", "http://llm-proxy:11434/openai/v1")
     return {
         # The contract (sandbox/contract.py CONTRACT_ENV).
         "CREUSET_CONTRACT_VERSION": str(TRANSCRIPT_SCHEMA_VERSION),
-        "CREUSET_SCENARIO_FILE": SCENARIO_MOUNT,
+        "CREUSET_SCENARIO_FILE": scenario_file,
         "CREUSET_RUN_ID": run_id,
         "CREUSET_VARIANT": variant,
         "CREUSET_MOCK_URL": f"{_MOCK_URL}/r/{quote(run_id, safe='')}",
@@ -346,7 +355,7 @@ def limits_from_env(env: Mapping[str, str] = os.environ) -> SandboxLimits:
     for directory in tmpfs:
         if not _TMPFS_DIR.fullmatch(directory) or "/../" in directory + "/" or "/./" in directory + "/":
             raise ValueError(f"CREUSET_SANDBOX_TMPFS: {directory!r} is not an absolute directory path")
-        if directory in ("/tmp", SCENARIO_MOUNT):
+        if directory in ("/tmp", SCENARIO_MOUNT, SCENARIO_VOLUME_DIR):
             raise ValueError(f"CREUSET_SANDBOX_TMPFS: {directory} is already mounted by the harness")
     return SandboxLimits(memory=memory, cpus=cpus, pids=int(pids), tmp_size=tmp_size, tmpfs=tmpfs)
 
@@ -362,6 +371,19 @@ def _docker(args: List[str], timeout: int = 60, input: Optional[str] = None) -> 
         ["docker", *args], capture_output=True, text=True, timeout=timeout,
         encoding="utf-8", errors="replace", input=input,
     )
+
+
+TRANSPORTS = ("bind", "volume")
+
+
+def scenario_transport() -> str:
+    """bind or volume (CREUSET_SCENARIO_TRANSPORT); by default volume for a tcp:// or ssh:// DOCKER_HOST."""
+    explicit = (os.getenv("CREUSET_SCENARIO_TRANSPORT") or "").strip().lower()
+    if explicit:
+        return explicit
+    # A bind mount names a path on THIS machine; a remote daemon resolves it on
+    # its own filesystem and mounts an empty directory, so every case would fail.
+    return "volume" if os.getenv("DOCKER_HOST", "").startswith(("tcp://", "ssh://")) else "bind"
 
 
 def _labels(run_id: Optional[str] = None, batch_id: Optional[str] = None) -> List[str]:
@@ -388,15 +410,20 @@ def remove_containers(batch_id: Optional[str] = None) -> int:
         if not _BATCH_ID.fullmatch(batch_id):
             return 0   # an empty or odd value must never widen the filter
         filters += ["--filter", f"label=creuset.batch={batch_id}"]
+    removed = 0
     try:
         listed = _docker(["ps", "-aq", *filters], timeout=30)
         ids = listed.stdout.split() if listed.returncode == 0 else []
-        if not ids:
-            return 0
-        removed = _docker(["rm", "-f", *ids], timeout=120)
-        return len(removed.stdout.split())
+        if ids:
+            removed = len(_docker(["rm", "-f", *ids], timeout=120).stdout.split())
+        # Input volumes (volume transport): removable once no container uses them.
+        volumes = _docker(["volume", "ls", "-q", *filters], timeout=30)
+        names = volumes.stdout.split() if volumes.returncode == 0 else []
+        if names:
+            _docker(["volume", "rm", "-f", *names], timeout=60)
     except (OSError, subprocess.TimeoutExpired):
-        return 0
+        pass
+    return removed
 
 
 def load_cases(path: Path) -> List[Dict[str, Any]]:
@@ -590,6 +617,9 @@ def preflight(subject: Optional[Subject] = None) -> List[str]:
         limits_from_env()
     except ValueError as e:
         problems.append(str(e))
+    if scenario_transport() not in TRANSPORTS:
+        problems.append(f"CREUSET_SCENARIO_TRANSPORT={scenario_transport()!r}: expected one of "
+                        f"{', '.join(TRANSPORTS)}")
     try:
         info = _docker(["info", "--format", "{{.ServerVersion}}"], timeout=20)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -803,33 +833,89 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
         return _failure(case_id, subject, run_id, "harness_error", f"Sandbox limits: {e}",
                         time.time() - setup_start, image_ref)
 
-    start = time.time()  # elapsed_seconds is the container's wall time, not the setup's
+    # Only what the agent may read: never the answer key (expected_behavior,
+    # forbidden_tools, patterns...), which an agent could otherwise read.
+    payload = json.dumps(agent_scenario(case))
+    volume = scenario_transport() == "volume"
+    scenario_file = SCENARIO_VOLUME_FILE if volume else SCENARIO_MOUNT
+    cmd = ["run", "--rm", "--name", container, *_labels(run_id, batch_id), *flags]
+    # The harness's variables, then the agent's own settings, which
+    # parse_agent_env() has already kept off every name the harness sets.
+    harness_env = _container_env(run_id, subject.variant, scenario_file)
+    for k, v in [*harness_env.items(), *_per_run(subject.env, harness_env)]:
+        cmd += ["-e", f"{k}={v}"]
+    tail = [image_ref, *subject.args(scenario_file)]
 
-    with tempfile.TemporaryDirectory(prefix="creuset-") as tmp:
-        scenario_path = Path(tmp) / "scenario.json"
-        # Only what the agent may read: never the answer key (expected_behavior,
-        # forbidden_tools, patterns...), which an agent could otherwise read.
-        scenario_path.write_text(json.dumps(agent_scenario(case)), encoding="utf-8")
-
-        cmd = ["run", "--rm", "--name", container, *_labels(run_id, batch_id), *flags]
-        # The harness's variables, then the agent's own settings, which
-        # parse_agent_env() has already kept off every name the harness sets.
-        harness_env = _container_env(run_id, subject.variant)
-        for k, v in [*harness_env.items(), *_per_run(subject.env, harness_env)]:
-            cmd += ["-e", f"{k}={v}"]
-        cmd += ["-v", f"{scenario_path.resolve().as_posix()}:{SCENARIO_MOUNT}:ro",
-                image_ref, *subject.args()]
-
+    if volume:
+        name = f"creuset-in-{run_id}".lower()
         try:
-            proc = _docker(cmd, timeout=TIMEOUT)
-        except subprocess.TimeoutExpired:
-            _docker(["rm", "-f", container], timeout=30)
-            return _failure(case_id, subject, run_id, "timeout",
-                            f"Container exceeded {TIMEOUT}s and was killed.", time.time() - start,
-                            image_ref)
+            problem = _fill_volume(name, payload, run_id, batch_id)
+            if problem:
+                return _failure(case_id, subject, run_id, "harness_error", problem,
+                                time.time() - setup_start, image_ref)
+            outcome = _run_agent([*cmd, "-v", f"{name}:{SCENARIO_VOLUME_DIR}:ro", *tail], container)
+        finally:
+            # After a timeout too: the agent's container is gone by then (--rm,
+            # or removed), so nothing holds the volume.
+            try:
+                _docker(["volume", "rm", "-f", name], timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        with tempfile.TemporaryDirectory(prefix="creuset-") as tmp:
+            scenario_path = Path(tmp) / "scenario.json"
+            scenario_path.write_text(payload, encoding="utf-8")
+            outcome = _run_agent([*cmd, "-v", f"{scenario_path.resolve().as_posix()}:{SCENARIO_MOUNT}:ro",
+                                  *tail], container)
 
-    elapsed = time.time() - start
+    proc, elapsed = outcome
+    if proc is None:
+        return _failure(case_id, subject, run_id, "timeout", f"Container exceeded {TIMEOUT}s and was killed.",
+                        elapsed, image_ref)
     return _finish(case_id, subject, run_id, image_ref, fixtures, proc, elapsed)
+
+
+def _run_agent(cmd: List[str], container: str) -> Tuple[Optional[subprocess.CompletedProcess], float]:
+    """(finished container, its wall time), or (None, wall time) after a timeout killed it."""
+    start = time.time()  # elapsed_seconds is the container's wall time, not the setup's
+    try:
+        return _docker(cmd, timeout=TIMEOUT), time.time() - start
+    except subprocess.TimeoutExpired:
+        _docker(["rm", "-f", container], timeout=30)
+        return None, time.time() - start
+
+
+_VOLUME_FILL = "import sys; open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())"
+
+
+def _fill_volume(volume: str, payload: str, run_id: str, batch_id: Optional[str]) -> Optional[str]:
+    """
+    Write the scenario into a fresh named volume through the Docker API alone, or
+    say why not. The payload travels on stdin with the API call, so it reaches a
+    daemon that cannot see this machine's files.
+    """
+    inspect = _docker(["inspect", MOCK_CONTAINER, "--format", "{{.Config.Image}}"])
+    image = inspect.stdout.strip()
+    if inspect.returncode != 0 or not image:
+        return f"The volume transport fills its volume with '{MOCK_CONTAINER}''s image, which is not running."
+    created = _docker(["volume", "create", *_labels(run_id, batch_id), volume], timeout=30)
+    if created.returncode != 0:
+        return f"Could not create the scenario volume {volume}: {created.stderr.strip()[:300]}"
+    # Root, in a container with no network and no capabilities: a new volume
+    # belongs to root. The file comes out world-readable, the agent mounts the
+    # volume read-only.
+    try:
+        proc = _docker(["run", "--rm", "-i", "--name", f"{volume}-fill", *_labels(run_id, batch_id),
+                        "--network", "none", "--read-only", "--cap-drop", "ALL",
+                        "--security-opt", "no-new-privileges", "--no-healthcheck", "--user", "0:0",
+                        "-v", f"{volume}:{SCENARIO_VOLUME_DIR}", "--entrypoint", "python", image,
+                        "-c", _VOLUME_FILL, SCENARIO_VOLUME_FILE], timeout=60, input=payload)
+    except subprocess.TimeoutExpired:
+        _docker(["rm", "-f", f"{volume}-fill"], timeout=30)
+        return f"Filling the scenario volume {volume} timed out."
+    if proc.returncode != 0:
+        return f"Could not fill the scenario volume {volume}: {proc.stderr.strip()[-300:]}"
+    return None
 
 
 def _finish(case_id: str, subject: Subject, run_id: str, image_ref: str, fixtures: List[str],
