@@ -66,6 +66,9 @@ inputs:
   judge-api-key:
     description: The judge's key, if it differs from llm-api-key.
     default: ""
+  tags:
+    description: 'Only cases with any of these tags, space-separated (e.g. "smoke" on every PR, all cases nightly).'
+    default: ""
   fail-on-block:
     description: '"false" to report the verdict in the outputs without failing the step.'
     default: "true"
@@ -81,7 +84,7 @@ outputs:
     description: '"true" if the result is a measurement (every case completed, the judge reachable).'
     value: ${{ steps.gate.outputs.valid }}
   exit-code:
-    description: 0 PASS, 1 FAIL, 2 rejected before running.
+    description: 0 PASS, 1 FAIL (blocked), 2 refused before running (bad inputs, sandbox not ready), 130 interrupted.
     value: ${{ steps.gate.outputs.exit-code }}
   junit:
     description: Path of the JUnit XML report.
@@ -144,6 +147,7 @@ runs:
         INPUT_WAIVERS: ${{ inputs.waivers }}
         INPUT_AGENT_ENV_FILE: ${{ inputs.agent-env-file }}
         INPUT_FAIL_ON_BLOCK: ${{ inputs.fail-on-block }}
+        INPUT_TAGS: ${{ inputs.tags }}
       run: |
         set -u
         in_workspace() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$GITHUB_WORKSPACE" "$1" ;; esac; }
@@ -153,6 +157,9 @@ runs:
               --library "$(in_workspace "$INPUT_LIBRARY")" --repeat "$INPUT_REPEAT" --dry-run
               --junit-xml "$out/junit.xml" --summary-md "$out/summary.md")
         if [ "$INPUT_SKIP_MODEL_JUDGE" = "true" ]; then args+=(--skip-model-judge); fi
+        # Each tag one argument; nothing in them is evaluated.
+        read -r -a tags <<< "$INPUT_TAGS"
+        for t in "${tags[@]}"; do args+=(--tag "$t"); done
         if [ -n "$INPUT_WAIVERS" ]; then args+=(--waivers "$(in_workspace "$INPUT_WAIVERS")"); fi
         if [ -n "$INPUT_AGENT_ENV_FILE" ]; then args+=(--agent-env-file "$(in_workspace "$INPUT_AGENT_ENV_FILE")"); fi
         # An empty CREUSET_CANARY would mean "no canary"; unset means "not configured".

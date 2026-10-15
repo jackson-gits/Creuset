@@ -18,6 +18,7 @@ Usage:
   # A subset
   python attacks/loader.py --variant hardened --category prompt_injection
   python attacks/loader.py --variant hardened --cases PI-001,TM-002
+  python attacks/loader.py --library attacks/generic_agent.yaml --tag owasp-llm07 ...
 
   # Finish a batch the provider's quota cut short (re-runs only what is missing)
   python attacks/loader.py --resume logs/runs/<batch>
@@ -233,12 +234,15 @@ def validate(cases: List[Dict[str, Any]], tools: Optional[List[str]] = None) -> 
 
 
 def select_cases(cases: List[Dict[str, Any]], categories: Optional[List[str]] = None,
-                 ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+                 ids: Optional[List[str]] = None, tags: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """The cases a batch runs. `tags`: any of them (a smoke subset per PR, the rest nightly)."""
     out = [c for c in cases if not c.get("probe")]  # probes never run against the agent
     if categories:
         out = [c for c in out if c.get("category") in categories]
     if ids:
         out = [c for c in out if c["id"] in ids]
+    if tags:
+        out = [c for c in out if set(c.get("tags") or []) & set(tags)]
     return out
 
 
@@ -618,6 +622,7 @@ def run_suite(
     selected_ids: Optional[List[str]] = None,
     subject: Optional[Subject] = None,
     repeat: int = 1,
+    tags: Optional[List[str]] = None,
 ) -> Path:
     """
     Run `cases` in parallel sandbox containers, save transcripts + manifest.
@@ -655,6 +660,7 @@ def run_suite(
         "source": git_source(),
         "categories": categories,
         "selected_ids": selected_ids,  # ad-hoc subset: coverage applies to these only
+        "tags": tags,                  # the same, by tag
         "agent_model": os.getenv("AGENT_MODEL"),
         "case_count": len(cases),
         # Runs per case. An agent that resists an attack 7 times in 10 is not
@@ -856,7 +862,8 @@ def resume_suite(
             f"genuinely intend a mixed batch.")
 
     all_cases = load_library(library)
-    in_scope = select_cases(all_cases, manifest.get("categories"), manifest.get("selected_ids"))
+    in_scope = select_cases(all_cases, manifest.get("categories"), manifest.get("selected_ids"),
+                            manifest.get("tags"))
     repeat = int(manifest.get("repeat") or 1)
     prior = {_entry_key(e): e for e in manifest.get("cases", [])}
     reconciled = _reconcile_with_disk(batch_dir, in_scope, prior, repeat)
@@ -981,6 +988,7 @@ def main(
                                                   "With --agent-image: any label."),
     category: Optional[List[str]] = typer.Option(None, help="Only these categories (repeatable)."),
     cases: Optional[str] = typer.Option(None, help="Comma-separated case IDs to run."),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", help="Only cases with this tag (repeatable: any of them)."),
     workers: int = typer.Option(int(os.getenv("GATE_WORKERS", "2")), help="Parallel sandbox containers."),
     repeat: int = typer.Option(1, "--repeat", min=1, max=MAX_REPEAT,
                                help="Run every case this many times; a case FAILs if any run does. "
@@ -1067,7 +1075,13 @@ def main(
     if unknown:
         console.print(f"[red]✗ --cases names {unknown}, which {library.name} does not contain.[/red]")
         raise typer.Exit(code=2)
-    selected = select_cases(all_cases, category, ids)
+    # A tag no case carries is a typo, and would otherwise select nothing (or,
+    # beside other tags, quietly less).
+    unused = sorted(set(tag or []) - {t for c in all_cases for t in (c.get("tags") or [])})
+    if unused:
+        console.print(f"[red]✗ --tag {unused}: no case in {library.name} carries it.[/red]")
+        raise typer.Exit(code=2)
+    selected = select_cases(all_cases, category, ids, tag)
     if not selected:
         console.print("[red]✗ No cases selected: nothing to run.[/red]")
         raise typer.Exit(code=1)
@@ -1085,7 +1099,7 @@ def main(
 
     try:
         manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
-                                  subject=subject, repeat=repeat)
+                                  subject=subject, repeat=repeat, tags=tag or None)
     except BatchInterrupted as e:
         _interrupted(e.manifest_path)
     _summarise(manifest_path)

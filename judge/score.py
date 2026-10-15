@@ -56,7 +56,7 @@ EXIT_NOT_MEASURED = 3
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from batch_files import file_sha256, library_drift, library_path, transcript_path  # noqa: E402
-from model_judge import JUDGE_MODEL, run_model_judge  # noqa: E402
+from model_judge import JUDGE_MODEL, JudgeConfigError, check_config, run_model_judge  # noqa: E402
 from report_formats import junit_xml, markdown_summary  # noqa: E402
 from rule_checks import CANARY_ENV, run_rule_checks  # noqa: E402
 from waivers import apply_waivers, counts_as_pass, load_waivers  # noqa: E402
@@ -292,12 +292,17 @@ def score_manifest(
               else bool(library_drift(manifest, library_file))}
     categories = manifest.get("categories")
     ids = manifest.get("selected_ids")
+    tags = set(manifest.get("tags") or [])
+
+    def _tagged(c: Dict[str, Any]) -> bool:
+        return not tags or bool(tags & set(c.get("tags") or []))
 
     def _in_scope(c: Dict[str, Any]) -> bool:
-        return (not categories or c.get("category") in categories) and (not ids or c["id"] in ids)
+        return (not categories or c.get("category") in categories) and (not ids or c["id"] in ids) and _tagged(c)
 
     expected = [c for c in library if not is_probe(c) and _in_scope(c)]
-    probes = [c for c in library if is_probe(c) and (not categories or c.get("category") in categories) and not ids]
+    probes = [c for c in library if is_probe(c) and (not categories or c.get("category") in categories)
+              and not ids and _tagged(c)]
     repeat = int(manifest.get("repeat") or 1)
     produced: Dict[str, Dict[int, Optional[str]]] = {}
     for entry in manifest.get("cases", []):
@@ -495,6 +500,15 @@ def main(
     summary_md: Optional[Path] = typer.Option(None, "--summary-md", help="Also write a Markdown summary."),
 ) -> None:
     """Score transcripts with rule-based + model judge and print the aggregate gate verdict."""
+    if not skip_model_judge:
+        # Refused once, here, rather than learnt from every case failing closed
+        # one judge call at a time (and a report that is then not a measurement).
+        try:
+            check_config()
+        except JudgeConfigError as e:
+            console.print(f"[red]✗ The judge is not configured: {e}[/red] "
+                          "(or pass --skip-model-judge for the rule layer alone)")
+            raise typer.Exit(code=2)
     if waivers is not None:
         try:
             load_waivers(waivers)
@@ -502,7 +516,11 @@ def main(
             console.print(f"[red]✗ {e}[/red]")
             raise typer.Exit(code=2)
     if manifest:
-        report = score_manifest(manifest, skip_model_judge, judge_all, waivers_path=waivers)
+        try:
+            report = score_manifest(manifest, skip_model_judge, judge_all, waivers_path=waivers)
+        except (OSError, ValueError, KeyError) as e:
+            console.print(f"[red]✗ Cannot score {manifest}: {e}[/red]")
+            raise typer.Exit(code=2)
     else:
         cases = _all_cases(library)
         if transcript_dir:

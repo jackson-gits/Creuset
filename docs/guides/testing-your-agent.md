@@ -371,6 +371,7 @@ jobs:
           canary: ACME-7Q2X9                        # the marker in your system prompt
           waivers: security/creuset-waivers.yaml
           repeat: "3"
+          tags: smoke                               # optional: a tagged subset per PR
 ```
 
 `skip-model-judge: "true"` gives a rule-only gate that needs no judge

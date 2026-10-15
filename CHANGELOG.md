@@ -26,6 +26,14 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **`--tag`** on the loader and the gate (and a `tags` input on the action):
+  run only the cases carrying any of the given tags, such as a `smoke` set on
+  every PR and everything nightly, or one OWASP category. Manifests and gate
+  records keep the selection, and coverage, resume and thresholds apply to
+  exactly that subset. A tag no case carries is refused, not an empty run.
+- `score.py` refuses an unconfigured judge before scoring (exit 2) instead of
+  failing every case closed one call at a time, and names a batch it cannot
+  read instead of printing a traceback.
 - **Remote Docker daemons** (GitLab's docker-in-docker, a remote
   `DOCKER_HOST`): the harness hands each scenario over in a short-lived named
   volume filled through the Docker API instead of a host bind mount, which such

@@ -38,7 +38,7 @@ harness sets:
 |---|---|
 | `variant` | The variant (bundled agent) or label (external image). |
 | `subject` | `{kind: bundled \| external, image, variant, image_id}`: what was tested. Absent in batches from before 2026-10-14. |
-| `library`, `categories`, `selected_ids` | Which cases were in scope. The scorer enforces coverage over exactly these. `library` is repo-relative when the library is in the repo. |
+| `library`, `categories`, `selected_ids`, `tags` | Which cases were in scope (`tags`: any of them, `--tag`). The scorer enforces coverage over exactly these. `library` is repo-relative when the library is in the repo. |
 | `library_snapshot`, `library_sha256` | The library's exact bytes, kept beside the manifest as `library.yaml`, and their sha256. A batch moved or downloaded scores and resumes from its snapshot when `library` is not on that machine; a resume refuses a library that changed since the batch ran. |
 | `source` | `{git_commit, dirty}`: the Creuset commit the batch ran from, and whether tracked files differed from it. |
 | `agent_model` | `AGENT_MODEL` at the time of the run. |
@@ -106,7 +106,7 @@ The rule checks, in order:
 | `error` | Why it was blocked or why the deploy failed. |
 | `version`, `variant`, `agent_image`, `library` | What was gated. |
 | `manifest`, `tested_image_id`, `tested_image_content` | The batch, and the single image all its cases ran. A deploy goes ahead only if the slot runs that content. |
-| `repeat`, `waivers` | Runs per case, and the waivers file used. |
+| `repeat`, `waivers`, `tags` | Runs per case, the waivers file used, and the `--tag` selection (null: every case). |
 | `slot` | The slot staged for a deploy: always the one that was not live. |
 | `score_report` | The full score report. |
 

@@ -466,6 +466,9 @@ def main(
                                                   help="KEY=VALUE lines for the agent's container. Never secrets."),
     repeat: int = typer.Option(1, "--repeat", min=1, max=50,
                                help="Run every case this many times; a case FAILs if any run does."),
+    tag: Optional[List[str]] = typer.Option(None, "--tag",
+                                            help="Only cases with this tag (repeatable: any of them). The "
+                                                 "thresholds then apply to that subset."),
     waivers: Optional[Path] = typer.Option(None, "--waivers", envvar="CREUSET_WAIVERS",
                                            help="Accepted failures, each with a reason and an expiry date."),
     junit: Optional[Path] = typer.Option(None, "--junit-xml", help="Also write the outcome as JUnit XML."),
@@ -481,13 +484,13 @@ def main(
     """
     with _sigterm_interrupts():
         _gate(version, variant, skip_model_judge, dry_run, library, agent_image, agent_env, agent_env_file,
-              repeat, waivers, junit, summary_md)
+              repeat, waivers, junit, summary_md, tag or [])
 
 
 def _gate(version: str, variant: Optional[str], skip_model_judge: bool, dry_run: bool,
           library: Optional[Path], agent_image: Optional[str], agent_env: Optional[List[str]],
           agent_env_file: Optional[Path], repeat: int, waivers: Optional[Path],
-          junit: Optional[Path], summary_md: Optional[Path]) -> None:
+          junit: Optional[Path], summary_md: Optional[Path], tags: List[str]) -> None:
     _variant = variant or version
     start_ts = time.time()
 
@@ -540,6 +543,7 @@ def _gate(version: str, variant: Optional[str], skip_model_judge: bool, dry_run:
         suite_args += ["--agent-env-file", str(agent_env_file)]
     if repeat > 1:
         suite_args += ["--repeat", str(repeat)]
+    suite_args += [arg for t in tags for arg in ("--tag", t)]
     try:
         manifest = _run_attack_suite(_variant, library, agent_image, suite_args)
     except KeyboardInterrupt:
@@ -624,6 +628,7 @@ def _gate(version: str, variant: Optional[str], skip_model_judge: bool, dry_run:
         library=str((library or _ATTACK_LIB).resolve()),
         agent_image=agent_image or AGENT_IMAGE,
         repeat=repeat,
+        tags=tags or None,
         waivers=str(waivers) if waivers else None,
     )
     _publish(score_report, gate_verdict, decision, note, junit, summary_md)

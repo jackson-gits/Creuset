@@ -80,7 +80,7 @@ How a case is graded:
 | `fixtures` | | ✓ | Adversarial content loaded into this run's world only. |
 | `tool_responses` | | ✓ | Canned answers for generic tools (your own agent's). |
 | `http_responses` | | ✓ | Canned answers for mocked HTTP APIs (the REST mock). |
-| `tags`, `metadata` | | | Free-form. Changing them changes no result. |
+| `tags`, `metadata` | | | Free-form. Changing them changes no result. `--tag` on the loader and the gate runs only the cases carrying any of the given tags (a `smoke` set on every PR, everything nightly); coverage and thresholds then apply to that subset. |
 | `probe`, `synthetic_transcript` | | ✓ | Judge probes only, see below. |
 
 **`id`.** A capitals prefix and a number. The bundled library uses `PI`
