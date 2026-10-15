@@ -67,6 +67,9 @@ load_dotenv(_ROOT / ".env")
 sys.path.insert(0, str(_ROOT / "sandbox"))
 sys.path.insert(0, str(_ROOT / "judge"))
 import call_policy  # noqa: E402
+from batch_files import (  # noqa: E402
+    LIBRARY_SNAPSHOT, file_sha256, git_source, library_drift, library_path, recorded_library, recorded_name,
+)
 from run_test import (  # noqa: E402
     Subject, env_fingerprint, image_content, image_id, limits_from_env, make_subject, parse_agent_env,
     preflight, remove_containers, run_case,
@@ -267,7 +270,8 @@ def _entry_key(entry: Dict[str, Any]) -> str:
 def _entry(case_id: str, transcript: Dict[str, Any], path: Path, sample: int = 1) -> Dict[str, Any]:
     """One run's manifest entry, derived from its transcript."""
     entry = {"id": case_id, "status": transcript.get("status"),
-             "transcript": str(path),
+             # Relative to the batch folder, so the folder can be moved or downloaded.
+             "transcript": path.name,
              # Recorded per case so a resumed batch can never hide that some of
              # its cases came from a different model...
              "agent_model": transcript.get("model"),
@@ -546,6 +550,9 @@ def run_suite(
     started_image_id = image_id(subject.image)
 
     runs = [(case, sample) for case in cases for sample in range(1, repeat + 1)]
+    # The library's exact bytes, beside the manifest: what the batch ran can be
+    # read back wherever the batch goes, and a resume can tell it was edited.
+    (batch_dir / LIBRARY_SNAPSHOT).write_bytes(library.read_bytes())
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "ts": int(time.time()),
@@ -556,7 +563,11 @@ def run_suite(
                     "image_content": image_content(subject.image) if started_image_id else None},
         # The box it ran in: memory, CPUs and writable paths can change behaviour.
         "sandbox": limits_from_env().describe(),
-        "library": str(library.resolve()),
+        "library": recorded_library(library),
+        "library_snapshot": LIBRARY_SNAPSHOT,
+        "library_sha256": file_sha256(library),
+        # The harness and judge code it ran with.
+        "source": git_source(),
         "categories": categories,
         "selected_ids": selected_ids,  # ad-hoc subset: coverage applies to these only
         "agent_model": os.getenv("AGENT_MODEL"),
@@ -724,9 +735,14 @@ def resume_suite(
 
     variant = manifest.get("variant")
     subject, previous_images = _manifest_subject(manifest, agent_env)
-    library = Path(manifest["library"])
-    if not library.exists():
-        raise FileNotFoundError(f"Library {library} named by the manifest no longer exists.")
+    library, _ = library_path(manifest, batch_dir)
+    # New runs would see the edited cases and old ones the originals: one batch,
+    # two libraries, and nothing in the numbers to show it.
+    drift = library_drift(manifest, library)
+    if drift:
+        raise ValueError(f"{drift}. Resuming would mix two versions of its cases in one batch; "
+                         f"restore it (the batch keeps the original as {LIBRARY_SNAPSHOT}) or start a new batch.")
+    library_label = Path(recorded_name(str(manifest.get("library") or library)))
 
     # Mixing models inside one batch makes its results incomparable, and it is
     # invisible once the numbers reach a table. Refuse by default.
@@ -778,7 +794,7 @@ def resume_suite(
     unknown = sorted(set(redo_ids or []) - {c["id"] for c in in_scope})
     if unknown:
         console.print(f"[yellow]⚠ --redo named {unknown}, which this batch does not cover "
-                      f"(variant {variant}, {library.name}). Ignored.[/yellow]")
+                      f"(variant {variant}, {library_label.name}). Ignored.[/yellow]")
 
     console.print(f"[bold]Resuming[/bold] {batch_dir.name} - variant [cyan]{variant}[/cyan], "
                   f"{len(prior)}/{len(in_scope) * repeat} run(s) already present.")
@@ -800,7 +816,7 @@ def resume_suite(
 
     stopped: Dict[str, Any] = {}
     new_entries = _execute_cases(todo, variant, batch_dir, workers, on_result,
-                                 f"[cyan]{variant}[/cyan] × {library.stem} [dim](resume)[/dim]",
+                                 f"[cyan]{variant}[/cyan] × {library_label.stem} [dim](resume)[/dim]",
                                  subject, repeat,
                                  checkpoint=lambda done: write_json(
                                      manifest_path, {**manifest, "complete": False, "cases": merged_with(done)}),

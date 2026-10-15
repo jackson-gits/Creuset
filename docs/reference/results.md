@@ -38,12 +38,14 @@ harness sets:
 |---|---|
 | `variant` | The variant (bundled agent) or label (external image). |
 | `subject` | `{kind: bundled \| external, image, variant, image_id}`: what was tested. Absent in batches from before 2026-10-14. |
-| `library`, `categories`, `selected_ids` | Which cases were in scope. The scorer enforces coverage over exactly these. |
+| `library`, `categories`, `selected_ids` | Which cases were in scope. The scorer enforces coverage over exactly these. `library` is repo-relative when the library is in the repo. |
+| `library_snapshot`, `library_sha256` | The library's exact bytes, kept beside the manifest as `library.yaml`, and their sha256. A batch moved or downloaded scores and resumes from its snapshot when `library` is not on that machine; a resume refuses a library that changed since the batch ran. |
+| `source` | `{git_commit, dirty}`: the Creuset commit the batch ran from, and whether tracked files differed from it. |
 | `agent_model` | `AGENT_MODEL` at the time of the run. |
 | `case_count`, `repeat`, `complete` | Cases, and runs per case (`--repeat`). `complete: false` while the batch runs (the manifest is written before the first run and after every one) and for good when it stopped early: the missing runs are unmade, not passed. |
 | `stopped` | Why an incomplete batch stopped: `{reason: "quota", consecutive}` (the circuit breaker) or `{reason: "interrupted", signal, containers_removed}` (Ctrl-C, SIGTERM). Absent when it ran to the end; a resume that finishes the batch removes it. |
 | `sandbox` | The box the containers ran in: memory, CPUs, process limit, writable directories. |
-| `cases[]` | `{id, sample, status, transcript, agent_model, elapsed_seconds, agent_image_id}`, one per run (`sample` from 2 on; run 2 of PI-001 is `PI-001.r2.json`). A resumed batch can never hide a change of model or image. |
+| `cases[]` | `{id, sample, status, transcript, agent_model, elapsed_seconds, agent_image_id}`, one per run (`sample` from 2 on; run 2 of PI-001 is `PI-001.r2.json`). `transcript` is relative to the batch folder (older batches recorded absolute paths, which still resolve, or by file name inside a moved batch). A resumed batch can never hide a change of model or image. |
 | `resumes[]` | One entry per `--resume`: what was re-run and why, and `stopped` if that resume was stopped too. |
 
 ## Score report (`report_version: 1`)
@@ -54,6 +56,7 @@ harness sets:
 | `valid` | **Whether the numbers are a measurement.** `false` if any case did not complete, the judge errored, an answer was truncated, or the batch was incomplete. The verdict is still fail-closed; just do not quote its rates. |
 | `unmeasured`, `judge_errors`, `truncated_finalizer`, `contract_errors` | The case IDs behind `valid: false`, by cause. (`truncated_finalizer` covers any truncated answer, under its original name.) |
 | `batch_complete` | The manifest's `complete`. |
+| `library_graded` | `{source, sha256, changed_since_run}`: the library the cases were graded against (`recorded` path or the batch's `snapshot`). `changed_since_run: true` means old transcripts were graded against edited cases, which is legitimate but a different question from the one the batch answered. |
 | `subject`, `variant`, `library` | What was scored, copied from the manifest. `subject.env` names the agent's own settings (`--agent-env`); `env_sha256` fingerprints their values. |
 | `repeat` | Runs per case. With more than one, a case FAILs if any run did. |
 | `models` | `{agent, judge}`. `judge: null` means a rule-only run (`--skip-model-judge`). |

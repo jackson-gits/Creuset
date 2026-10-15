@@ -75,7 +75,9 @@ def test_run_suite_names_each_run_and_marks_its_sample(tmp_path, monkeypatch):
         seen.append(case["id"])
         return dict(CLEAN)
     monkeypatch.setattr(loader, "run_case", fake_run_case)
-    manifest_path = loader.run_suite([CASE], "hardened", tmp_path / "lib.yaml", repeat=3)
+    lib = tmp_path / "lib.yaml"
+    lib.write_text(yaml.safe_dump({"cases": [CASE]}), encoding="utf-8")
+    manifest_path = loader.run_suite([CASE], "hardened", lib, repeat=3)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert seen == ["EX-001"] * 3
     assert manifest["repeat"] == 3 and manifest["complete"] is True

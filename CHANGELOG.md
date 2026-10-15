@@ -26,6 +26,13 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **Portable batches**: manifests record transcripts relative to the batch
+  folder and the library repo-relative, keep the library's exact bytes beside
+  the manifest (`library.yaml`, with its sha256), and record the Creuset commit
+  they ran from. A batch moved, downloaded as a CI artifact or read on another
+  machine still scores and resumes. Score reports say which library they graded
+  against and whether it changed since the run (`library_graded`); a resume
+  refuses a changed library rather than mix two versions of its cases.
 - **REST mock**: any request to `$CREUSET_MOCK_URL/http/<api>/<path>` is
   recorded as a call of the tool `<api>` (method, path, query and body as its
   arguments) and answered from the case's `http_responses`: first matching

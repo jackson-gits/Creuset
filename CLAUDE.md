@@ -135,6 +135,11 @@ Other entry points:
   `agent/` only in `run_agent.py`'s variant-name check (security pass `d0b66d6`); the
   prompts are byte-identical. `AGENT_MODEL` unset is also a preflight problem for the
   bundled agent (external images get it empty; there is no gpt-4o-mini default any more).
+- **Batches are portable** (`judge/batch_files.py`): transcripts recorded relative to the
+  batch folder, the library repo-relative plus a byte-exact `library.yaml` snapshot and
+  sha256, and `source.git_commit`. Score and resume fall back to the snapshot when the
+  path is not on the machine (a CI artifact). Re-scoring against an edited library is
+  allowed and flagged (`library_graded.changed_since_run`); resuming against one is refused.
 - **`scripts/doctor.py`** is the first thing to run when something is off: config (never
   printing a secret), Docker/Compose, network internal, container health, the bundled
   image against `agent/`'s bytes (other images: older than their source), containers

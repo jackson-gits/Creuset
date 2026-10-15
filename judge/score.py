@@ -50,6 +50,7 @@ from rich.console import Console
 from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from batch_files import file_sha256, library_drift, library_path, transcript_path  # noqa: E402
 from model_judge import JUDGE_MODEL, run_model_judge  # noqa: E402
 from report_formats import junit_xml, markdown_summary  # noqa: E402
 from rule_checks import CANARY_ENV, run_rule_checks  # noqa: E402
@@ -275,7 +276,15 @@ def score_manifest(
 ) -> Dict[str, Any]:
     """Score a batch manifest written by attacks/loader.py, enforcing coverage."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    library = load_library(Path(manifest["library"]))
+    batch_dir = manifest_path.parent
+    library_file, source = library_path(manifest, batch_dir)
+    library = load_library(library_file)
+    # Grading an old batch against an edited library is legitimate (a new
+    # pattern tried on old transcripts), but it is a different question from
+    # the one the batch was run to answer, and the report has to say so.
+    graded = {"source": source, "sha256": file_sha256(library_file),
+              "changed_since_run": None if not manifest.get("library_sha256")
+              else bool(library_drift(manifest, library_file))}
     categories = manifest.get("categories")
     ids = manifest.get("selected_ids")
 
@@ -296,11 +305,9 @@ def score_manifest(
     canary: Optional[List[str]] = [] if external and CANARY_ENV not in os.environ else None
 
     def _score_run(case: Dict[str, Any], sample: int) -> Dict[str, Any]:
-        path = produced.get(case["id"], {}).get(sample)
-        transcript = None
-        if path and Path(path).exists():
-            transcript = json.loads(Path(path).read_text(encoding="utf-8"))
-        return score_case(transcript, case, skip_model_judge, judge_all, path, canary)
+        path = transcript_path(batch_dir, produced.get(case["id"], {}).get(sample))
+        transcript = json.loads(path.read_text(encoding="utf-8")) if path else None
+        return score_case(transcript, case, skip_model_judge, judge_all, str(path) if path else None, canary)
 
     def _one(case: Dict[str, Any]) -> Dict[str, Any]:
         if repeat == 1:
@@ -312,7 +319,7 @@ def score_manifest(
         probe_results = list(pool.map(run_judge_probe, probes)) if (run_probes and not skip_model_judge) else []
 
     return build_report(results, probe_results, manifest, skip_model_judge,
-                        _waive(results, waivers_path))
+                        _waive(results, waivers_path), library_graded=graded)
 
 
 def _waive(results: List[Dict[str, Any]], waivers_path: Optional[Path]) -> Optional[Dict[str, Any]]:
@@ -324,7 +331,8 @@ def _waive(results: List[Dict[str, Any]], waivers_path: Optional[Path]) -> Optio
 
 def build_report(results: List[Dict[str, Any]], probe_results: List[Dict[str, Any]],
                  manifest: Dict[str, Any], skip_model_judge: bool,
-                 waivers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                 waivers: Optional[Dict[str, Any]] = None,
+                 library_graded: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     gate_verdict, agg, by_cat = aggregate(results)
     missing = [r["test_id"] for r in results if r.get("status") == "missing"]
     judge_errors = [r["test_id"] for r in results if r.get("judge_error")]
@@ -354,6 +362,9 @@ def build_report(results: List[Dict[str, Any]], probe_results: List[Dict[str, An
         "ts": int(time.time()),
         "variant": manifest.get("variant"),
         "library": manifest.get("library"),
+        # The library the cases were graded against: the recorded path or the
+        # batch's snapshot, its sha256, and whether it differs from what ran.
+        "library_graded": library_graded,
         # What was tested (kind, image, image ID); None for batches that predate it.
         "subject": manifest.get("subject"),
         # Runs per case; with more than one, a case FAILs if any run did.
@@ -414,8 +425,17 @@ def print_report(report: Dict[str, Any]) -> None:
         console.print(f"  [yellow]⚠ Transcript broke schemas/transcript.v1.json for "
                       f"{report['contract_errors']} — see each case's contract_violations.[/yellow]")
     if report.get("batch_complete") is False:
-        console.print("  [yellow]⚠ The batch was stopped early by the quota circuit breaker — "
-                      "cases it never reached are counted FAIL (fail-closed), not measured.[/yellow]")
+        console.print("  [yellow]⚠ The batch did not finish (quota circuit breaker or an interrupt) — "
+                      "cases it never reached are counted FAIL (fail-closed), not measured. Finish it "
+                      "with attacks/loader.py --resume.[/yellow]")
+    graded = report.get("library_graded") or {}
+    if graded.get("changed_since_run"):
+        console.print("  [yellow]⚠ Graded against the library as it is NOW, which has changed since the "
+                      "batch ran: the agent saw the cases as they were then (the batch keeps them as "
+                      "library.yaml).[/yellow]")
+    elif graded.get("source") == "snapshot":
+        console.print("  [dim]Graded against the batch's own copy of its library (the recorded path "
+                      "is not on this machine).[/dim]")
     if report.get("judge_errors"):
         console.print(f"  [yellow]⚠ Judge unreachable for {report['judge_errors']} — failed closed. "
                       f"These are infrastructure failures, not findings about the agent; "
