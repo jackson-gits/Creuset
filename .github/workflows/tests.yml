@@ -34,8 +34,13 @@ jobs:
       - name: Unit tests
         run: pytest
 
-      - name: Attack library schema
-        run: python attacks/loader.py --dry-run
+      - name: Test library schemas
+        run: |
+          python attacks/loader.py --dry-run
+          python attacks/loader.py --dry-run --library attacks/benign_tasks.yaml
+          python attacks/loader.py --dry-run --library attacks/generic_agent.yaml
+          python attacks/loader.py --dry-run --library examples/scripted-agent/cases.yaml
+          python attacks/loader.py --dry-run --library examples/scripted-agent/cases_http.yaml
 
       # Compose rejects some combinations (e.g. pids_limit beside
       # deploy.resources.limits) only at `up` time; catch them here instead.
@@ -45,21 +50,21 @@ jobs:
           AGENT_MODEL: ci-placeholder
         run: docker compose config --quiet
 
-      # Each provider profile goes through the entrypoint script compose mounts
-      # and must give a config nginx accepts. The default must also render
-      # byte-for-byte the config the published results ran behind (the image's
-      # real envsubst, not the Python emulation in the unit tests), and a
-      # profile the script refuses must stop the container before nginx starts.
+      # Each provider profile goes through the image compose runs (config and
+      # entrypoint script baked in by deploy/llm-proxy/Dockerfile) and must give
+      # a config nginx accepts. The default must also render byte-for-byte the
+      # config the published results ran behind (the image's real envsubst, not
+      # the Python emulation in the unit tests), and a profile the script
+      # refuses must stop the container before nginx starts.
       - name: llm-proxy nginx config is valid
         run: |
           set -eu
+          docker build -q -t creuset-llm-proxy:ci deploy/llm-proxy
           render() {  # nginx -t one profile; arguments are `-e NAME=value` pairs
             RENDERED="$(mktemp -d)"
             docker run --rm -e LLM_PROXY_RESOLVER=127.0.0.11 "$@" \
-              -v "$PWD/deploy/llm-proxy:/etc/nginx/templates:ro" \
-              -v "$PWD/deploy/llm-proxy/05-creuset-validate.envsh:/docker-entrypoint.d/05-creuset-validate.envsh:ro" \
               -v "$RENDERED:/etc/nginx/conf.d" \
-              nginx:1.31-alpine nginx -t
+              creuset-llm-proxy:ci nginx -t
           }
 
           echo "::group::default (Groq), byte-identical to the published config"
@@ -70,6 +75,11 @@ jobs:
           echo "::group::OpenAI (/v1, Responses and embeddings enabled)"
           render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=api.openai.com \
             -e "LLM_ALLOWED_ENDPOINTS=chat/completions|models|responses|embeddings"
+          echo "::endgroup::"
+
+          echo "::group::Anthropic (Messages API, key in x-api-key)"
+          render -e LLM_API_KEY=ci-placeholder -e LLM_UPSTREAM_HOST=api.anthropic.com \
+            -e LLM_AUTH_HEADER=x-api-key -e "LLM_ALLOWED_ENDPOINTS=messages|models"
           echo "::endgroup::"
 
           echo "::group::prefixed provider (path prefix, port, x-api-key, extra CA)"
@@ -92,3 +102,73 @@ jobs:
           fi
           echo "$out" | grep -F "refusing to start llm-proxy"
           echo "::endgroup::"
+
+  # The whole sandbox → judge → gate path, live, for free: the deterministic
+  # example agent (examples/scripted-agent) needs no model, so llm-proxy runs
+  # with a placeholder key and no provider is ever called. Proves the harness,
+  # mock-services, the isolation of creuset-net and the gate's exit codes on a
+  # real Docker stack, which the unit tests can only simulate.
+  sandbox-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build the example agent
+        run: docker build -t creuset-example-scripted:ci examples/scripted-agent
+
+      # The action from this repository, exactly as another project would use it
+      # (uses: jackson-gits/Creuset@<ref>). Twice in one job, as a real pipeline
+      # gating two configurations would: the second must not trip over the
+      # first's containers.
+      - name: Gate the careful variant (must pass)
+        id: careful
+        uses: ./
+        with:
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases.yaml
+          variant: careful
+          skip-model-judge: "true"
+          repeat: "2"
+
+      - name: Gate the naive variant (must be blocked)
+        id: naive
+        uses: ./
+        with:
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases.yaml
+          variant: naive
+          skip-model-judge: "true"
+          fail-on-block: "false"
+
+      # The same agent talking HTTP to what it takes for its own orders API:
+      # only its URL setting changes (rest.env), never its code.
+      - name: Gate it over the REST mock (must pass)
+        id: rest
+        uses: ./
+        with:
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases_http.yaml
+          agent-env-file: examples/scripted-agent/rest.env
+          variant: careful
+          skip-model-judge: "true"
+
+      - name: The verdicts are the expected ones
+        env:
+          CAREFUL: ${{ steps.careful.outputs.verdict }}/${{ steps.careful.outputs.exit-code }}/${{ steps.careful.outputs.valid }}
+          NAIVE: ${{ steps.naive.outputs.verdict }}/${{ steps.naive.outputs.exit-code }}/${{ steps.naive.outputs.valid }}
+          REST: ${{ steps.rest.outputs.verdict }}/${{ steps.rest.outputs.exit-code }}/${{ steps.rest.outputs.valid }}
+          JUNIT: ${{ steps.naive.outputs.junit }}
+        run: |
+          echo "careful: $CAREFUL (want PASS/0/true), naive: $NAIVE (want FAIL/1/true), rest: $REST (want PASS/0/true)"
+          test "$CAREFUL" = "PASS/0/true" && test "$NAIVE" = "FAIL/1/true" && test "$REST" = "PASS/0/true"
+          grep -q '<failure' "$JUNIT"
+
+      - name: Container logs
+        if: failure()
+        env:   # Compose will not parse the file without them
+          LLM_API_KEY: unused
+          AGENT_MODEL: unused
+        run: docker compose logs --no-color llm-proxy mock-services

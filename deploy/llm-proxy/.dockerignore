@@ -1,0 +1,4 @@
+# Only the two files the Dockerfile copies belong in the build context.
+*
+!default.conf.template
+!05-creuset-validate.envsh

@@ -15,6 +15,15 @@
 Dockerfile*     text eol=lf
 Makefile        text eol=lf
 
+# Copied into a Linux image, where the bytes ARE what runs. A CRLF prompt is a
+# different prompt to the model, so a Windows checkout with core.autocrlf built
+# an agent image that was not the one CI builds, and sandbox/run_test.py's byte
+# check against agent/ (rightly) refused it.
+agent/**                    text eol=lf
+sandbox/mock_services/**    text eol=lf
+examples/**                 text eol=lf
+deploy/router.py            text eol=lf
+
 # Byte-exact fixtures compared by tests: identical on every platform.
 tests/snapshots/** text eol=lf
 

@@ -1,0 +1,213 @@
+name: Creuset agent security gate
+description: >
+  Run your AI agent's container against a library of adversarial test cases in
+  an isolated sandbox, score what it did (server-side ground truth plus an
+  optional LLM judge), and fail the job if it misbehaves.
+author: Jackson
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  agent-image:
+    description: The agent under test, as a local Docker image built earlier in the job.
+    required: true
+  library:
+    description: The test library (YAML), relative to the workspace or absolute.
+    required: true
+  variant:
+    description: A label for this configuration of the agent, recorded in every report and passed to the container.
+    default: candidate
+  version:
+    description: The version being gated, recorded in the gate record.
+    default: ${{ github.sha }}
+  repeat:
+    description: Runs per case. A case fails if any run does.
+    default: "1"
+  workers:
+    description: Agent containers run in parallel. Provider rate limits usually decide this.
+    default: "1"
+  skip-model-judge:
+    description: '"true" for the deterministic rule layer only: no judge model, no judge key.'
+    default: "false"
+  waivers:
+    description: Accepted failures (a reason and an expiry date each), relative to the workspace.
+    default: ""
+  agent-env-file:
+    description: KEY=VALUE settings for the agent's container, relative to the workspace. Never secrets.
+    default: ""
+  canary:
+    description: The marker planted in your agent's system prompt; a case fails wherever it shows up.
+    default: ""
+  llm-api-key:
+    description: The LLM provider key. Only llm-proxy (which injects it) and the judge receive it, never the agent.
+    default: ""
+  llm-upstream-host:
+    description: The one provider host llm-proxy may reach.
+    default: api.groq.com
+  llm-allowed-endpoints:
+    description: 'API endpoints llm-proxy forwards, e.g. "chat/completions|models" or "messages|models" for Anthropic.'
+    default: chat/completions|models
+  llm-auth-header:
+    description: The header llm-proxy puts the key in (x-api-key for Anthropic).
+    default: Authorization
+  agent-api-base:
+    description: The LLM endpoint as the agent sees it (OPENAI_BASE_URL).
+    default: http://llm-proxy:11434/openai/v1
+  agent-model:
+    description: The model the agent should request (AGENT_MODEL).
+    default: ""
+  judge-api-base:
+    description: The judge's OpenAI-compatible endpoint, called from the runner.
+    default: ""
+  judge-model:
+    description: The judge model.
+    default: ""
+  judge-api-key:
+    description: The judge's key, if it differs from llm-api-key.
+    default: ""
+  tags:
+    description: 'Only cases with any of these tags, space-separated (e.g. "smoke" on every PR, all cases nightly).'
+    default: ""
+  fail-on-block:
+    description: '"false" to report the verdict in the outputs without failing the step.'
+    default: "true"
+
+outputs:
+  verdict:
+    description: PASS or FAIL.
+    value: ${{ steps.gate.outputs.verdict }}
+  decision:
+    description: DRY_RUN_WOULD_DEPLOY or BLOCKED.
+    value: ${{ steps.gate.outputs.decision }}
+  valid:
+    description: '"true" if the result is a measurement (every case completed, the judge reachable).'
+    value: ${{ steps.gate.outputs.valid }}
+  exit-code:
+    description: 0 PASS, 1 FAIL (blocked), 2 refused before running (bad inputs, sandbox not ready), 130 interrupted.
+    value: ${{ steps.gate.outputs.exit-code }}
+  junit:
+    description: Path of the JUnit XML report.
+    value: ${{ steps.gate.outputs.junit }}
+  summary:
+    description: Path of the Markdown summary (also added to the job summary).
+    value: ${{ steps.gate.outputs.summary }}
+  record:
+    description: Path of the gate's JSON audit record.
+    value: ${{ steps.gate.outputs.record }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Creuset
+      shell: bash
+      run: pip install --quiet -r "$GITHUB_ACTION_PATH/requirements.txt"
+
+    # Every input reaches a script through the environment, never spliced into
+    # it: `${{ }}` inside `run:` is expanded before the shell parses the line.
+    - name: Start the sandbox
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        LLM_API_KEY: ${{ inputs.llm-api-key || 'creuset-no-key' }}
+        LLM_UPSTREAM_HOST: ${{ inputs.llm-upstream-host }}
+        LLM_ALLOWED_ENDPOINTS: ${{ inputs.llm-allowed-endpoints }}
+        LLM_AUTH_HEADER: ${{ inputs.llm-auth-header }}
+        AGENT_MODEL: ${{ inputs.agent-model || 'unset' }}
+        MOCK_STRICT_RUNS: "1"
+        CREUSET_AGENT_IMAGE: ${{ inputs.agent-image }}
+      run: |
+        docker compose build --quiet mock-services llm-proxy
+        docker compose up -d --wait llm-proxy mock-services
+        python scripts/doctor.py --probe
+
+    - name: Run the gate
+      id: gate
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        LLM_API_KEY: ${{ inputs.llm-api-key || 'creuset-no-key' }}
+        AGENT_MODEL: ${{ inputs.agent-model || 'unset' }}
+        AGENT_API_BASE: ${{ inputs.agent-api-base }}
+        JUDGE_API_BASE: ${{ inputs.judge-api-base }}
+        JUDGE_MODEL: ${{ inputs.judge-model }}
+        JUDGE_API_KEY: ${{ inputs.judge-api-key }}
+        CREUSET_CANARY: ${{ inputs.canary }}
+        GATE_WORKERS: ${{ inputs.workers }}
+        INPUT_AGENT_IMAGE: ${{ inputs.agent-image }}
+        INPUT_LIBRARY: ${{ inputs.library }}
+        INPUT_VARIANT: ${{ inputs.variant }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_REPEAT: ${{ inputs.repeat }}
+        INPUT_SKIP_MODEL_JUDGE: ${{ inputs.skip-model-judge }}
+        INPUT_WAIVERS: ${{ inputs.waivers }}
+        INPUT_AGENT_ENV_FILE: ${{ inputs.agent-env-file }}
+        INPUT_FAIL_ON_BLOCK: ${{ inputs.fail-on-block }}
+        INPUT_TAGS: ${{ inputs.tags }}
+      run: |
+        set -u
+        in_workspace() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$GITHUB_WORKSPACE" "$1" ;; esac; }
+        # One folder per invocation: a job that gates twice must not have the
+        # second run overwrite the first one's reports.
+        out="$(mktemp -d "$RUNNER_TEMP/creuset-XXXXXX")"
+        # Physical paths: with `uses: ./` the action path is ".../repo/./", and
+        # upload-artifact refuses any path with a "." segment. Written first, so
+        # the upload step has them however this step ends.
+        logs="$(pwd -P)/logs"
+        {
+          echo "artifact=creuset-${INPUT_VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${out##*-}"
+          echo "reports=$out"
+        } >> "$GITHUB_OUTPUT"
+        args=(--version "$INPUT_VERSION" --variant "$INPUT_VARIANT" --agent-image "$INPUT_AGENT_IMAGE"
+              --library "$(in_workspace "$INPUT_LIBRARY")" --repeat "$INPUT_REPEAT" --dry-run
+              --junit-xml "$out/junit.xml" --summary-md "$out/summary.md")
+        if [ "$INPUT_SKIP_MODEL_JUDGE" = "true" ]; then args+=(--skip-model-judge); fi
+        # Each tag one argument; nothing in them is evaluated.
+        read -r -a tags <<< "$INPUT_TAGS"
+        for t in "${tags[@]}"; do args+=(--tag "$t"); done
+        if [ -n "$INPUT_WAIVERS" ]; then args+=(--waivers "$(in_workspace "$INPUT_WAIVERS")"); fi
+        if [ -n "$INPUT_AGENT_ENV_FILE" ]; then args+=(--agent-env-file "$(in_workspace "$INPUT_AGENT_ENV_FILE")"); fi
+        # An empty CREUSET_CANARY would mean "no canary"; unset means "not configured".
+        if [ -z "$CREUSET_CANARY" ]; then unset CREUSET_CANARY; fi
+
+        code=0
+        python gate/run_gate.py "${args[@]}" || code=$?
+
+        record="$(ls -t "$logs"/gate_runs/gate_*.json 2>/dev/null | head -n 1 || true)"
+        python - "$record" >> "$GITHUB_OUTPUT" <<'PY'
+        import json, os, sys
+        record = json.load(open(sys.argv[1], encoding="utf-8")) if sys.argv[1] else {}
+        report = record.get("score_report") or {}
+        print(f"verdict={record.get('verdict', 'FAIL')}")
+        print(f"decision={record.get('decision', 'BLOCKED')}")
+        print(f"valid={str(bool(report.get('valid'))).lower()}")
+        # This gate's own batch, for the artifact (empty if it was refused up front).
+        print(f"batch={os.path.dirname(record['manifest']) if record.get('manifest') else ''}")
+        PY
+        {
+          echo "exit-code=$code"
+          echo "junit=$out/junit.xml"
+          echo "summary=$out/summary.md"
+          echo "record=$record"
+        } >> "$GITHUB_OUTPUT"
+        if [ "$INPUT_FAIL_ON_BLOCK" = "true" ] && [ "$code" -ne 0 ]; then
+          echo "::error::Creuset gate: exit $code (see the job summary)"
+          exit "$code"
+        fi
+
+    - name: Keep the transcripts and reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        # This invocation's evidence only: its batch (transcripts, manifest,
+        # library snapshot), its gate record, its JUnit and summary.
+        name: ${{ steps.gate.outputs.artifact || format('creuset-{0}-{1}', inputs.variant, github.run_id) }}
+        path: |
+          ${{ steps.gate.outputs.batch }}
+          ${{ steps.gate.outputs.record }}
+          ${{ steps.gate.outputs.reports }}
+        if-no-files-found: ignore

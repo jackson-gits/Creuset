@@ -1,12 +1,21 @@
-FROM python:3.11-slim
+FROM python:3.11.16-slim-trixie
+
+LABEL org.opencontainers.image.title="creuset-router" \
+      org.opencontainers.image.description="Creuset's blue/green traffic switch" \
+      org.opencontainers.image.source="https://github.com/jackson-gits/Creuset" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-COPY requirements.router.txt .
-RUN pip install --no-cache-dir -r requirements.router.txt
+COPY requirements.router.txt constraints.router.txt ./
+RUN pip install --no-cache-dir -r requirements.router.txt -c constraints.router.txt
 COPY router.py .
 # Unprivileged: the router only reads state/ (mounted read-only) and proxies.
 RUN useradd --uid 10002 --no-create-home --shell /usr/sbin/nologin router
 USER router
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
 CMD ["python", "router.py"]

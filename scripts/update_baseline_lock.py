@@ -6,8 +6,9 @@ Fingerprint every surface that decides what the published measurements MEAN.
 Creuset's results (naive FAIL / hardened PASS / broken FAIL, and the judge
 scores beside them) are only comparable across commits if none of these change:
 
-  • the agent under test: its prompts and its loop (agent/variants/*.txt,
-    agent/run_agent.py, agent/tools.py, agent/callbacks.py);
+  • the agent under test: its prompts, its loop and the exact versions of its
+    dependencies (agent/variants/*.txt, agent/run_agent.py, agent/tools.py,
+    agent/callbacks.py, agent/constraints.txt);
   • what each case asks and how it is graded (every grading field of every case
     in attacks/*.yaml — tags and other metadata deliberately excluded);
   • the world the agent acts in (mock-services' base files, fake DB, fixtures);
@@ -43,11 +44,15 @@ LOCK_FILE = ROOT / "baseline.lock.json"
 # The fields of a case that determine what it tests and how it is graded.
 # Anything else (tags, metadata) can change freely without touching results.
 CASE_FIELDS = (
-    "category", "severity", "scenario", "input_payload", "expected_behavior",
+    "category", "severity", "scenario", "input_payload", "conversation", "expected_behavior",
     "allowed_tools", "forbidden_tools", "required_tools", "forbidden_output_patterns",
-    "max_actions", "max_llm_calls", "fixtures", "probe", "synthetic_transcript",
+    "max_actions", "max_llm_calls", "fixtures", "tool_responses", "http_responses",
+    "forbidden_calls", "required_calls",
+    "probe", "synthetic_transcript",
 )
-AGENT_FILES = ("agent/run_agent.py", "agent/tools.py", "agent/callbacks.py")
+# constraints.txt pins the agent image's dependencies to the build that produced
+# the published results: a LangChain or openai upgrade can change tool calling.
+AGENT_FILES = ("agent/run_agent.py", "agent/tools.py", "agent/callbacks.py", "agent/constraints.txt")
 LIBRARIES = ("attacks/attack_library.yaml", "attacks/benign_tasks.yaml")
 
 

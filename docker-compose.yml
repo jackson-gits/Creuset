@@ -23,35 +23,50 @@
 #   docker compose build
 #   docker compose up -d llm-proxy mock-services   # needed for gate runs
 #   docker compose up -d                           # + blue/green slots + router
+#
+# A second stack beside this one (CI next to a dev stack, a second checkout):
+# set CREUSET_PREFIX (e.g. ci-) and a different ROUTER_HOST_PORT. Every
+# container, network and the project name get the prefix, and the harness
+# (sandbox/run_test.py) applies the same one. Service names, which agents use as
+# DNS names inside the sandbox, never change.
 # ─────────────────────────────────────────────────────────────────────────────
 
-name: creuset
+name: ${CREUSET_PREFIX:-}creuset
 
 networks:
   creuset-net:
-    name: creuset-net
+    name: ${CREUSET_PREFIX:-}creuset-net
     driver: bridge
     internal: true   # ← CRITICAL: no outbound internet from the sandbox
   creuset-edge:
-    name: creuset-edge
+    name: ${CREUSET_PREFIX:-}creuset-edge
     driver: bridge
 
 # Environment shared by every agent container. Mirrors what
-# sandbox/run_test.py passes to one-shot test containers.
+# sandbox/run_test.py passes to one-shot test containers (_container_env):
+# a slot that served traffic under different limits than the gate tested
+# would not be the build that passed.
 x-agent-env: &agent-env
+  OPENAI_BASE_URL: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
   OPENAI_API_BASE: ${AGENT_API_BASE:-http://llm-proxy:11434/openai/v1}
   OPENAI_API_KEY: sandbox-placeholder-key   # real key is injected by llm-proxy
+  ANTHROPIC_BASE_URL: ${AGENT_ANTHROPIC_BASE:-http://llm-proxy:11434}
+  ANTHROPIC_API_KEY: sandbox-placeholder-key
   AGENT_MODEL: ${AGENT_MODEL:?set AGENT_MODEL in .env}
   MOCK_SERVICES_HOST: mock-services
   MOCK_SERVICES_PORT: "8001"
   MAX_LLM_CALLS: ${MAX_LLM_CALLS:-15}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-8}
   AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-700}
+  FINALIZER_MAX_TOKENS: ${FINALIZER_MAX_TOKENS:-1024}
   LIVE_TRAFFIC_DIR: /app/live_traffic
 
 x-agent-slot: &agent-slot
   build:
     context: ./agent
-  image: creuset-agent:latest
+  # The same tag the harness tests (AGENT_IMAGE_TAG). The gate checks that the
+  # recreated slot runs the image ID it tested, not merely this tag.
+  image: ${AGENT_IMAGE_TAG:-creuset-agent:latest}
   entrypoint: ["uvicorn", "serve:app", "--host", "0.0.0.0", "--port", "8000"]
   command: []
   networks:
@@ -82,8 +97,12 @@ services:
 
   # ── LLM egress gateway ────────────────────────────────────────────────────
   llm-proxy:
-    image: nginx:1.31-alpine
-    container_name: llm-proxy
+    # nginx:1.31-alpine with the config below baked in (deploy/llm-proxy/Dockerfile),
+    # so it also works on a Docker daemon that cannot see this machine's files.
+    build:
+      context: ./deploy/llm-proxy
+    image: creuset-llm-proxy:latest
+    container_name: ${CREUSET_PREFIX:-}llm-proxy
     environment:
       LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env}
       LLM_UPSTREAM_HOST: ${LLM_UPSTREAM_HOST:-api.groq.com}
@@ -98,11 +117,6 @@ services:
       LLM_AUTH_HEADER: ${LLM_AUTH_HEADER:-Authorization}
       LLM_AUTH_PREFIX: ${LLM_AUTH_PREFIX:-}
       LLM_PROXY_EXTRA_CA_FILE: ${LLM_PROXY_EXTRA_CA_FILE:-}
-    volumes:
-      - ./deploy/llm-proxy:/etc/nginx/templates:ro
-      # Sourced by the image's entrypoint before the template is rendered. If it
-      # is missing, nginx refuses the config rather than start unvalidated.
-      - ./deploy/llm-proxy/05-creuset-validate.envsh:/docker-entrypoint.d/05-creuset-validate.envsh:ro
     # The one container holding the real key gets the tightest box: read-only
     # root (the rendered config, cache and pid file live in tmpfs) and only the
     # three capabilities the nginx master needs to hand workers to `nginx`.
@@ -143,9 +157,15 @@ services:
     build:
       context: ./sandbox/mock_services
     image: creuset-mock-services:latest
-    container_name: mock-services
+    container_name: ${CREUSET_PREFIX:-}mock-services
     networks:
       - creuset-net
+    environment:
+      # 1 = refuse tool calls that name no run, or an uninitialised one (400/409),
+      # instead of acting in a lazily created world without the case's fixtures.
+      # Safe for gate runs: the harness creates every run's world itself. The
+      # bundled live slots also initialise theirs (agent/serve.py).
+      MOCK_STRICT_RUNS: ${MOCK_STRICT_RUNS:-0}
     # Holds the audit log the judge treats as ground truth, and shares a network
     # with the agents under test — so it is boxed as tightly as they are.
     read_only: true
@@ -162,7 +182,9 @@ services:
           pids: 128
           cpus: "0.50"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      # The image's own Python: curl is not installed (one tool fewer in a
+      # container that shares a network with the agents under test).
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -174,7 +196,7 @@ services:
   # missing the image default (AGENT_VARIANT=hardened) applies.
   agent-blue:
     <<: *agent-slot
-    container_name: agent-blue
+    container_name: ${CREUSET_PREFIX:-}agent-blue
     env_file:
       - path: ./deploy/state/blue.env
         required: false
@@ -184,7 +206,7 @@ services:
 
   agent-green:
     <<: *agent-slot
-    container_name: agent-green
+    container_name: ${CREUSET_PREFIX:-}agent-green
     env_file:
       - path: ./deploy/state/green.env
         required: false
@@ -198,7 +220,7 @@ services:
       context: ./deploy
       dockerfile: Dockerfile.router
     image: creuset-router:latest
-    container_name: creuset-router
+    container_name: ${CREUSET_PREFIX:-}creuset-router
     networks:
       - creuset-edge
       - creuset-net

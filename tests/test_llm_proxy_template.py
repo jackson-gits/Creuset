@@ -105,6 +105,13 @@ PROFILES = {
         {**TODAY, "LLM_UPSTREAM_PORT": "443", "LLM_AUTH_PREFIX": "Token  "},
         {**DEFAULTS, "LLM_UPSTREAM_PORT": "443", "LLM_AUTH_PREFIX": "Token "},
     ),
+    "anthropic": (  # the Messages API: /v1/messages, key in x-api-key, no Bearer
+        {**TODAY, "LLM_UPSTREAM_HOST": "api.anthropic.com", "LLM_AUTH_HEADER": "x-api-key",
+         "LLM_ALLOWED_ENDPOINTS": "messages|models"},
+        {**DEFAULTS, "LLM_UPSTREAM_HOST": "api.anthropic.com", "LLM_AUTH_HEADER": "x-api-key",
+         "LLM_AUTH_PREFIX": "", "LLM_ALLOWED_ENDPOINTS": "messages|models",
+         "CREUSET_PROXY_AUTH_CLEAR": _CLEAR_AUTHORIZATION},
+    ),
     "local-http": (  # a compose-internal gateway that takes no key
         {"LLM_API_KEY": "", "LLM_UPSTREAM_HOST": "ollama", "LLM_PROXY_RESOLVER": "127.0.0.11",
          "LLM_UPSTREAM_SCHEME": "http", "LLM_UPSTREAM_PORT": "11434"},
@@ -114,7 +121,7 @@ PROFILES = {
     ),
 }
 
-ENDPOINT_VOCABULARY = {"chat/completions", "completions", "embeddings", "models", "responses"}
+ENDPOINT_VOCABULARY = {"chat/completions", "completions", "embeddings", "models", "responses", "messages"}
 
 
 def envsubst(template: str, env: dict[str, str]) -> str:
@@ -126,8 +133,9 @@ def envsubst(template: str, env: dict[str, str]) -> str:
 
 
 def render(env: dict[str, str]) -> str:
-    # newline="": compare the bytes nginx would read, not a platform translation.
-    return envsubst(TEMPLATE.read_text(encoding="utf-8", newline=""), env)
+    # Decode the raw bytes: compare what nginx would read, not a platform newline
+    # translation. (read_text(newline="") says the same but needs Python 3.13.)
+    return envsubst(TEMPLATE.read_bytes().decode("utf-8"), env)
 
 
 # ── 1. The default render is the published config ───────────────────────────
@@ -161,10 +169,16 @@ def test_compose_passes_the_defaults_the_snapshot_was_rendered_with():
         passed[name] = m.group(2)
     passed["LLM_API_KEY"] = KEY  # `:?` — required, no default
     assert passed == COMPOSE_DEFAULTS
-    # Without this mount nginx refuses the config (see below), so a refactor
-    # that drops it is caught here rather than as a proxy that will not start.
-    assert any(str(v).endswith(":/docker-entrypoint.d/05-creuset-validate.envsh:ro")
-               for v in proxy["volumes"])
+    # The config is baked into the image, not mounted: a remote Docker daemon
+    # resolves a bind mount on its own disk and would start nginx without it.
+    assert proxy["build"]["context"] == "./deploy/llm-proxy" and "volumes" not in proxy
+    dockerfile = (ROOT / "deploy" / "llm-proxy" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM nginx:1.31-alpine" in dockerfile
+    assert "COPY default.conf.template /etc/nginx/templates/default.conf.template" in dockerfile
+    # Without the envsh, or without its exec bit (the entrypoint skips it then),
+    # nginx refuses the config (see below): a refactor that drops either is
+    # caught here rather than as a proxy that will not start.
+    assert "COPY --chmod=0755 05-creuset-validate.envsh /docker-entrypoint.d/05-creuset-validate.envsh" in dockerfile
 
 
 def test_template_uses_only_variables_the_envsh_sets():
@@ -282,9 +296,16 @@ def test_bypass_fix_holds(profile):
     if final["LLM_AUTH_HEADER"].lower() != "authorization":
         assert 'proxy_set_header Authorization "";' in rendered
 
+    allowed = set(final["LLM_ALLOWED_ENDPOINTS"].split("|"))
     for target, expected in BYPASS_PROBES.items():
         upstream_path = _forwarded(rendered, final, target)
+        # A probe that normalises to an endpoint this profile does not allow
+        # (Anthropic's has no chat/completions) must be refused like the rest.
+        if expected is not None and expected.split("/v1/", 1)[1] not in allowed:
+            expected = None
         assert upstream_path == (None if expected is None else final["LLM_UPSTREAM_PATH_PREFIX"] + expected), target
+    # And the Anthropic batch API, which acts on the account, never passes.
+    assert _forwarded(rendered, final, "/v1/messages/batches") is None
 
 
 @pytest.mark.parametrize("target", ["/v1/models%0A", "/openai/v1/chat/completions%0A",
@@ -377,6 +398,7 @@ REFUSED = {
     "regex group": ({"LLM_ALLOWED_ENDPOINTS": "models)|(.*"}, "LLM_ALLOWED_ENDPOINTS"),
     "dot segment endpoint": ({"LLM_ALLOWED_ENDPOINTS": "models/../files"}, "LLM_ALLOWED_ENDPOINTS"),
     "nested files path": ({"LLM_ALLOWED_ENDPOINTS": "files/content"}, "LLM_ALLOWED_ENDPOINTS"),
+    "anthropic batches": ({"LLM_ALLOWED_ENDPOINTS": "messages|messages/batches"}, "LLM_ALLOWED_ENDPOINTS"),
     # The auth header and prefix.
     "header with a space": ({"LLM_AUTH_HEADER": "X Api-Key"}, "LLM_AUTH_HEADER"),
     "header with an underscore": ({"LLM_AUTH_HEADER": "api_key"}, "LLM_AUTH_HEADER"),
@@ -417,3 +439,17 @@ def test_envsh_refuses_an_unusable_extra_ca(tmp_path, content, reason):
     result = _source_envsh({**TODAY, "LLM_PROXY_EXTRA_CA_FILE": str(ca)})
     assert result.returncode != 0
     assert reason in result.stderr
+
+
+def test_anthropic_profile_routes_the_messages_api_only():
+    _, final = PROFILES["anthropic"]
+    rendered = render(final)
+    assert _forwarded(rendered, final, "/v1/messages") == "/v1/messages"
+    assert _forwarded(rendered, final, "/v1/models") == "/v1/models"
+    for refused in ("/v1/chat/completions", "/v1/messages/batches", "/v1/messages/count_tokens",
+                    "/v1/files", "/v1/messages%2F..%2Ffiles"):
+        assert _forwarded(rendered, final, refused) is None, refused
+    # The key goes in x-api-key with no scheme word, and the agent's own
+    # Authorization header is dropped rather than passed through.
+    assert f'proxy_set_header x-api-key "{KEY}";' in rendered
+    assert 'proxy_set_header Authorization "";' in rendered

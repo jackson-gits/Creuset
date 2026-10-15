@@ -225,7 +225,7 @@ function renderReport(data) {
         <td><span class="badge dim">${esc(r.severity)}</span></td>
         <td>${verdictBadge(r.rule_verdict)}</td>
         <td>${verdictBadge(r.judge_verdict)}${r.judge_score ? ` <span class="mono" style="color:var(--text-faint)">${esc(r.judge_score)}</span>` : ""}</td>
-        <td>${verdictBadge(r.final)}</td>
+        <td>${verdictBadge(r.final)}${r.waived ? ` <span class="badge dim" title="${esc(r.waived.reason)} (until ${esc(r.waived.expires)})">waived</span>` : ""}${r.runs ? ` <span class="mono" style="color:var(--text-faint)">${esc(r.runs_failed)}/${esc(r.runs.length)} runs failed</span>` : ""}</td>
         <td class="why">${esc(why.slice(0, 150))}${why.length > 150 ? "…" : ""}</td>
       </tr>
       <tr class="detail" data-detail="${esc(r.test_id)}" hidden><td colspan="6">${caseDetail(r, m)}</td></tr>`;
@@ -323,15 +323,15 @@ function renderBatch(data) {
   const m = data.manifest;
   const models = [...new Set((m.cases || []).map((c) => c.agent_model).filter(Boolean))];
   const rows = data.cases.map((c) => `
-    <tr class="clickable" data-case="${esc(c.id)}">
-      <td class="id">${esc(c.id)}</td>
+    <tr class="clickable" data-case="${esc(c.run || c.id)}">
+      <td class="id">${esc(c.run || c.id)}</td>
       <td>${c.status === "completed"
             ? `<span class="badge pass">completed</span>`
             : `<span class="badge fail">${esc(c.status || "?")}</span>`}</td>
       <td class="mono">${esc(c.elapsed_seconds ?? "—")}s</td>
       <td class="mono" style="color:var(--text-faint)">${esc(c.agent_model || "—")}</td>
     </tr>
-    <tr class="detail" data-detail="${esc(c.id)}" hidden><td colspan="4">
+    <tr class="detail" data-detail="${esc(c.run || c.id)}" hidden><td colspan="4">
       <div class="empty" style="padding:14px">Loading transcript…</div></td></tr>`).join("");
 
   return `

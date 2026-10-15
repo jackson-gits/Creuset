@@ -191,8 +191,8 @@ def test_reinit_with_different_responses_is_409(client):
 
 
 def test_init_bounds_and_validates_responses(client):
-    for bad in ({"Issue-Refund": 1},
-                {"1refund": 1},
+    for bad in ({"-refund": 1},
+                {"refund now": 1},
                 {f"t{i}": i for i in range(65)},
                 {"big": "x" * (64 * 1024)}):
         assert _init(client, "r1", responses=bad).status_code == 400
@@ -217,11 +217,15 @@ def test_generic_tool_call_is_recorded_with_its_name(client):
 
 def test_generic_tool_names_are_validated(client):
     _init(client, "r1")
-    for bad in ("Issue_refund", "1refund", "refund-now", "_refund", "a" * 65):
-        assert client.post(f"/r/r1/tools/{bad}").status_code == 422
+    for bad in ("-refund", ".refund", "refund now", "refund%20now", "a" * 65):
+        assert client.post(f"/r/r1/tools/{bad}").status_code in (404, 422), bad
     assert client.post("/r/r1/tools/issue_refund", json=[1, 2]).status_code == 422  # args are an object
     assert _audit(client, "r1") == []
-    assert client.post(f"/r/r1/tools/{'a' * 64}").status_code == 200
+    # Real agents' names: camelCase, hyphens, MCP-style dots, a leading digit or underscore.
+    for good in ("lookupOrder", "issue-refund", "files.read", "1refund", "_refund", "a" * 64):
+        assert client.post(f"/r/r1/tools/{good}").status_code == 200, good
+    assert [e["tool"] for e in _audit(client, "r1")] == [
+        "lookupOrder", "issue-refund", "files.read", "1refund", "_refund", "a" * 64]
 
 
 def test_oversized_tool_call_is_refused_but_still_recorded(client):

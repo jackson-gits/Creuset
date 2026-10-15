@@ -290,8 +290,11 @@ def batch(name: str = Query(..., description="Batch directory name under logs/ru
     m = _read_json(manifest_path)
     cases = []
     for entry in m.get("cases") or []:
+        sample = entry.get("sample") or 1
         cases.append({
             "id": entry.get("id"),
+            # One row per run: with --repeat, run 2 of EX-001 is EX-001.r2.json.
+            "run": entry.get("id") if sample == 1 else f"{entry.get('id')}.r{sample}",
             "status": entry.get("status"),
             "elapsed_seconds": entry.get("elapsed_seconds"),
             "agent_model": entry.get("agent_model"),

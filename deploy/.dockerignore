@@ -1,0 +1,6 @@
+# The router image needs router.py and its requirements only. In particular,
+# keep live deployment state and the llm-proxy config out of the build context.
+*
+!router.py
+!requirements.router.txt
+!constraints.router.txt

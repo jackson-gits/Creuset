@@ -35,8 +35,13 @@ needed.
 ruff check . && pytest
 python attacks/loader.py --dry-run                                    # attack library schema
 python attacks/loader.py --dry-run --library attacks/benign_tasks.yaml
+python attacks/loader.py --dry-run --library examples/scripted-agent/cases.yaml
 pre-commit run --all-files
 ```
+
+With Docker running, `python scripts/doctor.py --probe` checks the stack, and
+CI's `sandbox-e2e` job runs the real sandbox and gate against the example agent
+(no key needed) on every push.
 
 All of these run in seconds, with **no Docker, no API key and no provider
 quota**. CI runs the lint, the tests and the attack-library check on every push
@@ -58,7 +63,8 @@ decides *what is measured* has moved. These surfaces are fingerprinted in
 |---|---|
 | `agent/variants/*.txt` | the whole file (the agents under test) |
 | `agent/run_agent.py`, `agent/tools.py`, `agent/callbacks.py` | the whole file (the agent loop, finalizer, tools and LLM budget) |
-| every case in `attacks/attack_library.yaml` and `attacks/benign_tasks.yaml` | its grading fields: `category`, `severity`, `scenario`, `input_payload`, `expected_behavior`, `allowed_tools`, `forbidden_tools`, `required_tools`, `forbidden_output_patterns`, `max_actions`, `max_llm_calls`, `fixtures`, `probe`, `synthetic_transcript` |
+| `agent/constraints.txt` | the whole file (the exact dependency versions in the agent image) |
+| every case in `attacks/attack_library.yaml` and `attacks/benign_tasks.yaml` | its grading fields: `category`, `severity`, `scenario`, `input_payload`, `expected_behavior`, `allowed_tools`, `forbidden_tools`, `required_tools`, `forbidden_output_patterns`, `max_actions`, `max_llm_calls`, `fixtures`, `tool_responses`, `probe`, `synthetic_transcript` |
 | `sandbox/mock_services/main.py` | `_BASE_FILES`, `_BASE_DB`, `_FIXTURES` (the world the agent acts in) |
 | `judge/model_judge.py` | `_SYSTEM_PROMPT`, `_USER_TEMPLATE` |
 | `judge/score.py` | the default `THRESHOLDS` |
@@ -73,10 +79,11 @@ Two tests guard them:
 
 Case `tags` and `metadata`, comments, and code that only *reads* these surfaces
 are free to change. Some things are measurement-affecting but not hashed, so
-call them out in the PR yourself: the agent's dependency versions (LangChain
-stays on 0.2.x on purpose), and the models and token limits a run uses
-(`AGENT_MODEL`, `JUDGE_MODEL`, `AGENT_MAX_TOKENS`, `FINALIZER_MAX_TOKENS`,
-`JUDGE_SAMPLES`).
+call them out in the PR yourself: the agent image's base (`agent/Dockerfile`),
+and the models and token limits a run uses (`AGENT_MODEL`, `JUDGE_MODEL`,
+`AGENT_MAX_TOKENS`, `FINALIZER_MAX_TOKENS`, `JUDGE_SAMPLES`). LangChain stays on
+0.2.x on purpose; `agent/constraints.txt` pins the exact versions the published
+results ran with.
 
 A measurement-affecting change is allowed. It has to be a decision, not an
 accident:
@@ -146,7 +153,12 @@ be added in **both**:
    here makes `--dry-run` reject the case.
 
 A fixture registered only in the loader passes validation, and then
-mock-services refuses to create the run's world (`400 Unknown fixture`).
+mock-services refuses to create the run's world (`400 Unknown fixture`);
+`tests/test_loader.py` fails if the two lists disagree.
+
+Fixtures belong to the bundled agent's world. A case for another agent plants
+its content with `tool_responses` instead (see
+`examples/scripted-agent/cases.yaml`), which needs no change to mock-services.
 Rebuild the image after changing fixtures (`docker compose build
 mock-services`); a stale image serves the old world. Fixture content is
 measurement-affecting (see above).

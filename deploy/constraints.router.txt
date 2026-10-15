@@ -1,0 +1,29 @@
+# Exact versions for this image, used as pip constraints (-c) beside the
+# requirements file's ranges. Captured with `pip freeze` from the image
+# creuset-router built 2026-09-20,
+# so a rebuild installs the same versions rather than whatever resolves today.
+# Update deliberately: regenerate from a freshly built image and say so in
+# CHANGELOG.md.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+fastapi==0.141.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.20
+packaging==26.3
+pydantic==2.13.5
+pydantic_core==2.46.5
+python-dotenv==1.2.3
+PyYAML==6.0.3
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.53.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==17.1

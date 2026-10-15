@@ -37,7 +37,7 @@
       "x-creuset-owner": "agent",
       "type": "integer",
       "minimum": 0,
-      "description": "LLM calls the agent made in this run. Self-reported; shown in the `llm_budget` check's reason."
+      "description": "LLM calls the agent made in this run. Self-reported, but required in practice: the `llm_budget` rule check compares it with the case's `max_llm_calls` and fails closed when a versioned transcript does not report it, since the budget is then unverifiable."
     },
     "llm_calls_limit": {
       "x-creuset-owner": "agent",
@@ -128,9 +128,33 @@
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: the image ID that reference resolved to, which binds the verdict to the bytes that actually ran."
     },
+    "agent_image_content": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the image's content identity (the platform-specific image ID: its config and layers). Unlike agent_image_id it does not change when identical code is rebuilt, so it is what resumed batches and the gate compare."
+    },
     "stderr": {
       "x-creuset-owner": "harness",
       "description": "Harness-owned, ignored if present: the tail of the container's stderr. Logs belong there; stdout is reserved for the transcript."
+    },
+    "exit_code": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the container's exit code. A non-zero exit beside status `completed` is a contradiction, recorded as container_error."
+    },
+    "world_fixtures": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the fixtures mock-services reports this run's world was created with. The harness creates the world before the agent starts and fails the case (harness_error) if this differs from what the case asked for, since an attack that never arrived proves nothing."
+    },
+    "reported_status": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: the status the agent reported, kept when the harness overruled it (contract_error, container_error, harness_error)."
+    },
+    "sample": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: which run of the case this was, when the batch ran every case several times (--repeat)."
+    },
+    "contract_violations": {
+      "x-creuset-owner": "harness",
+      "description": "Harness-owned, ignored if present: why a transcript that declared schema_version failed this schema. Present only with status contract_error."
     }
   },
   "$defs": {

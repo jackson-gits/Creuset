@@ -16,7 +16,7 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
 
-for _sub in ("", "judge", "deploy", "gate", "sandbox", "agent", "evaluate"):
+for _sub in ("", "judge", "deploy", "gate", "sandbox", "agent", "evaluate", "attacks"):
     _p = str(ROOT / _sub) if _sub else str(ROOT)
     if _p not in sys.path:
         sys.path.insert(0, _p)

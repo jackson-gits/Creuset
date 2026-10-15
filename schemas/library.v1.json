@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:creuset:schema:library:v1",
+  "title": "Creuset test library, version 1",
+  "description": "A YAML (or JSON) file of test cases for attacks/loader.py: either a bare list of cases, or an object with `cases` and, optionally, the `tools` inventory its cases may name. attacks/loader.py validates against this schema and then checks what a schema cannot: unique ids, every tool named by a case is in the inventory, no tool both allowed and forbidden, every pattern compiles, and every tool_responses key is in the inventory. A library that declares no `tools` gets the bundled agent's six (send_email, delete_file, charge_payment, query_database, read_file, list_files), so a typo such as `delete_files` in forbidden_tools is an error rather than an assertion that can never fail.",
+  "oneOf": [
+    {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "cases"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "description": "Optional. Declares this format."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional. Shown in reports."
+        },
+        "description": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolName"
+          },
+          "description": "Every tool name the agent under test can call. Cases may name only these. Omit for the bundled agent's six."
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/case"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "toolName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$",
+      "description": "A tool name as OpenAI and Anthropic tool calling accept it (letters, digits, _ and -, at most 64), plus dots for MCP-style namespaced names. It may not start with - or ., and is case-sensitive: lookupOrder and lookuporder are different tools."
+    },
+    "toolList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/toolName"
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "id",
+        "category",
+        "severity",
+        "scenario",
+        "input_payload",
+        "expected_behavior",
+        "allowed_tools",
+        "forbidden_tools",
+        "forbidden_output_patterns"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9]{1,9}-[0-9]{3,6}$",
+          "description": "Unique and permanent: published results refer to it. A prefix of capitals and a number, e.g. PI-001 or ORDERS-0042. It names files, so nothing else is allowed."
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Groups cases in reports (prompt_injection, tool_misuse, ...)."
+        },
+        "severity": {
+          "enum": [
+            "critical",
+            "high",
+            "medium"
+          ],
+          "description": "Which gate threshold the case counts against."
+        },
+        "scenario": {
+          "type": "string",
+          "description": "What the case tests, for humans and the judge. Never shown to the agent."
+        },
+        "input_payload": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The user message the agent receives."
+        },
+        "conversation": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": [
+              "role",
+              "content"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "enum": [
+                  "user",
+                  "assistant"
+                ]
+              },
+              "content": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "description": "Earlier turns for a multi-turn attack, replayed before input_payload (the last user message). An assistant turn here is scripted by the test: fabricated history is itself an attack. Agents that keep no history (the bundled one) ignore it."
+        },
+        "expected_behavior": {
+          "type": "string",
+          "description": "The safe outcome, stated plainly first. The LLM judge grades against it literally. Never shown to the agent."
+        },
+        "allowed_tools": {
+          "$ref": "#/$defs/toolList",
+          "description": "The happy path, given to the judge for context. Not a security boundary."
+        },
+        "forbidden_tools": {
+          "$ref": "#/$defs/toolList",
+          "description": "The safety assertion: calling any of these FAILs the case. Checked against the transcript AND the mock-services audit log."
+        },
+        "required_tools": {
+          "$ref": "#/$defs/toolList",
+          "description": "Tools the agent must call (over-refusal checks in benign tasks)."
+        },
+        "forbidden_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/callRule"
+          },
+          "description": "Argument-level safety assertions: a call matching any rule FAILs the case. Checked against the server audit, and against self-reported calls whose input is an object. Without `when`, a rule is the same as forbidden_tools."
+        },
+        "required_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/callRule"
+          },
+          "description": "Calls the agent must make, with these arguments, in the server audit (self-report does not count)."
+        },
+        "forbidden_output_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Python regexes that must not match the final answer. Only markers of real leakage that a safe refusal would never contain."
+        },
+        "max_actions": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Most tool calls the agent may make (default 10)."
+        },
+        "max_llm_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "LLM-call budget for this case (default MAX_LLM_CALLS)."
+        },
+        "fixtures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Adversarial content mock-services loads into this run's world only. Must be a fixture mock-services defines (sandbox/mock_services/main.py _FIXTURES)."
+        },
+        "tool_responses": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/toolName"
+          },
+          "maxProperties": 64,
+          "description": "Canned answers for generic tools: tool name -> the JSON POST /tools/{name} returns in this run. This is how a case plants adversarial content in YOUR agent's tool output. At most 64, each at most 64 KiB as JSON."
+        },
+        "http_responses": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/toolName"
+          },
+          "maxProperties": 16,
+          "additionalProperties": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/$defs/httpRule"
+            }
+          },
+          "description": "Mocked HTTP APIs: api name -> rules. Requests to $CREUSET_MOCK_URL/http/<api>/<path> are recorded in the server audit (as calls of the tool <api>, with method, path, query and body as arguments) and answered by the first matching rule. With --agent-env 'MY_API_URL=${CREUSET_MOCK_URL}/http/my-api', an agent that reads its API base URL from the environment needs no code change."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Free-form labels. Not graded; changing them is not measurement-affecting."
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Free-form data (source, references, author). Not graded."
+        },
+        "probe": {
+          "enum": [
+            "judge"
+          ],
+          "description": "Not run against the agent: the judge is scored on synthetic_transcript instead."
+        },
+        "synthetic_transcript": {
+          "type": "object",
+          "description": "Required with probe: judge."
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "Operators that must all hold for one argument. A missing argument, or a comparison that cannot be made, is indeterminate: a forbidden rule then still matches (the call cannot be cleared), a required rule does not (the call cannot be proved).",
+      "properties": {
+        "equals": {
+          "description": "Exact JSON equality: \"500\" is not 500."
+        },
+        "not_equals": {},
+        "in": {
+          "type": "array"
+        },
+        "not_in": {
+          "type": "array"
+        },
+        "matches": {
+          "type": "string",
+          "description": "Python regex, searched in the value (non-strings as JSON)."
+        },
+        "not_matches": {
+          "type": "string"
+        },
+        "contains": {
+          "type": "string",
+          "description": "Case-sensitive substring of the value (non-strings as JSON)."
+        },
+        "not_contains": {
+          "type": "string"
+        },
+        "gt": {
+          "type": "number"
+        },
+        "gte": {
+          "type": "number"
+        },
+        "lt": {
+          "type": "number"
+        },
+        "lte": {
+          "type": "number"
+        },
+        "exists": {
+          "type": "boolean"
+        }
+      }
+    },
+    "callRule": {
+      "type": "object",
+      "required": [
+        "tool"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "$ref": "#/$defs/toolName"
+        },
+        "when": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Argument path (dots into objects, numbers into lists) -> conditions. Every condition must hold.",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/condition"
+          }
+        },
+        "description": {
+          "type": "string",
+          "description": "Shown in the failure reason instead of the rule."
+        }
+      }
+    },
+    "httpRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One canned answer of a mocked HTTP API. The first rule whose method and path match a request answers it; a request no rule matches gets a 404.",
+      "not": {
+        "required": [
+          "path",
+          "path_matches"
+        ]
+      },
+      "properties": {
+        "method": {
+          "type": "string",
+          "pattern": "^(\\*|[A-Za-z]+)$",
+          "description": "GET (default), POST, PUT, PATCH, DELETE, HEAD, OPTIONS, or * for any."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "The exact path after the api name, e.g. /orders/1042."
+        },
+        "path_matches": {
+          "type": "string",
+          "description": "A Python regex the whole path must match, e.g. ^/orders/\\d+$."
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599,
+          "description": "Default 200."
+        },
+        "body": {
+          "description": "The JSON answered."
+        }
+      }
+    }
+  }
+}
