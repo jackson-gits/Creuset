@@ -53,7 +53,8 @@ gate/run_gate.py --version X [--variant V] [--skip-model-judge] [--dry-run]
  │         check it runs the tested image ID → switch.py switch <slot>
  │         (state.json = traffic, <slot>.env = build); any failure exits 3, traffic stays
  └─ always writes logs/gate_runs/gate_<ts>.json audit record
-    exit codes: 0 PASS (deployed / dry run), 1 FAIL, 2 rejected up front, 3 PASS not deployed
+    exit codes: 0 PASS (deployed / dry run), 1 FAIL, 2 rejected up front, 3 PASS not deployed,
+    130 interrupted (Ctrl-C/SIGTERM; the record names the batch to --resume)
 ```
 
 Other entry points:
@@ -429,7 +430,11 @@ $P attacks/loader.py --variant hardened --cases PI-006   # prints manifest path 
 # Idempotent: running it on a finished batch spends nothing. Refuses to resume
 # under a different AGENT_MODEL, because that would silently mix models in one
 # batch. Reconciles the manifest against the transcripts on disk first, so a
-# batch killed mid-run (Ctrl-C, closed pipe) does not re-run finished cases.
+# batch killed mid-run does not re-run finished cases. (Until 2026-10-15 a batch
+# killed before its end had no manifest at all and could not be resumed; it is
+# now written up front and after every run.) Ctrl-C / SIGTERM stop a batch
+# cleanly: queued runs cancelled, its labelled containers removed, exit 130.
+# Leftovers from a crash: $P sandbox/run_test.py --cleanup
 $P attacks/loader.py --resume logs/runs/<batch>
 $P attacks/loader.py --resume logs/runs/<batch> --redo-empty   # + empty answers
 $P attacks/loader.py --resume logs/runs/<batch> --redo PI-005  # + named cases

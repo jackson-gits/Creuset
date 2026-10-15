@@ -159,6 +159,19 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **A batch killed before its end could not be resumed**: the manifest was
+  written only when a batch finished, so Ctrl-C, a closed terminal or a
+  cancelled CI job left transcripts that `--resume` refused ("nothing to
+  resume") and quota spent for nothing. It is now written before the first run
+  and after every one, atomically.
+- **Ctrl-C did not stop a batch**: the worker pool ran every queued case on its
+  way out, and SIGTERM ended the loader with its `docker run` children still
+  going. Both now stop it at a safe point: queued runs never start, the batch's
+  containers are removed (every harness container is labelled with its stack,
+  batch and run), a run the stop cut off is not recorded as a result, and the
+  loader exits 130 with the resume command. The gate gives its loader time to
+  do this (it used to kill it 0.25 s after Ctrl-C), passes a SIGTERM on, and
+  exits 130 with no verdict. `run_test.py --cleanup` removes what a crash left.
 - **A bundled image built from other files ran under the new name**: prompts
   and agent code are baked in at build time, so editing a variant without
   rebuilding ran the old prompt while every record named the new one. Preflight

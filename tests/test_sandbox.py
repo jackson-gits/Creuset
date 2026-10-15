@@ -176,6 +176,14 @@ def test_a_missing_image_is_a_harness_error_not_a_crash(docker):
     assert [a[0] for a in fake.calls] == ["image"]
 
 
+def test_the_container_is_labelled_for_cleanup(docker):
+    fake = docker(agent_stdout=COMPLETED)
+    t = run_test.run_case(_case(), "broken", batch_id="20261015-abc")
+    args = fake.run_args()
+    labels = {args[i + 1] for i, a in enumerate(args) if a == "--label"}
+    assert labels == {run_test.STACK_LABEL, f"creuset.run={t['run_id']}", "creuset.batch=20261015-abc"}
+
+
 def test_container_env_has_no_made_up_model(docker, monkeypatch):
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     fake = docker(agent_stdout=COMPLETED)

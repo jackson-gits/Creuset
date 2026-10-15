@@ -1,6 +1,8 @@
 """Deploy path: nothing unvalidated reaches a slot's env file or live traffic."""
 
 import json
+import os
+import signal
 
 import pytest
 from typer.testing import CliRunner
@@ -354,3 +356,64 @@ def test_tested_content_needs_one_content_across_the_batch(tmp_path):
     path.write_text(json.dumps({"subject": {"image_content": CONTENT}, "cases": [
         {"id": "A-001", "agent_image_content": CONTENT}, {"id": "A-002"}]}))
     assert run_gate.tested_image_content(path) is None
+
+
+# ── Interrupted ───────────────────────────────────────────────────────────────
+
+def test_an_interrupted_suite_is_no_verdict_and_names_the_batch_to_resume(gate_env, monkeypatch, tmp_path):
+    logs, calls = gate_env
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(run_gate, "_RUNS_DIR", runs)
+
+    def interrupted(*a, **k):
+        (runs / "b1").mkdir(parents=True)
+        (runs / "b1" / "manifest.json").write_text("{}", encoding="utf-8")   # the loader writes it up front
+        raise KeyboardInterrupt
+    monkeypatch.setattr(run_gate, "_run_attack_suite", interrupted)
+    result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--skip-model-judge"])
+    assert result.exit_code == 130 and calls["deploy"] == []
+    (record,) = _records(logs)
+    assert record["verdict"] == "FAIL" and "Interrupted while running the attack suite" in record["error"]
+    assert f"--resume {runs / 'b1'}" in record["error"]
+
+
+def test_a_loader_that_was_interrupted_interrupts_the_gate(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_gate, "_child", lambda cmd: 130)
+    with pytest.raises(KeyboardInterrupt):
+        run_gate._run_attack_suite("hardened")
+
+
+class Child:
+    def __init__(self):
+        self.waits, self.signals, self.killed = [], [], False
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if len(self.waits) == 1:
+            raise KeyboardInterrupt
+        return 130
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+
+    def kill(self):
+        self.killed = True
+
+
+def test_an_interrupted_phase_gives_its_script_time_to_clean_up(monkeypatch):
+    child = Child()
+    monkeypatch.setattr(run_gate.subprocess, "Popen", lambda cmd, cwd=None: child)
+    with pytest.raises(KeyboardInterrupt):
+        run_gate._child(["loader"])
+    # Not subprocess.run's kill a quarter of a second later.
+    assert child.waits == [None, run_gate._CHILD_GRACE_SECONDS] and not child.killed
+    if os.name != "nt":
+        assert child.signals == [signal.SIGTERM]   # a SIGTERM to the gate alone, passed on
+
+
+def test_sigterm_stops_the_gate_like_ctrl_c():
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(KeyboardInterrupt):
+        with run_gate._sigterm_interrupts():
+            signal.raise_signal(signal.SIGTERM)
+    assert signal.getsignal(signal.SIGTERM) == before

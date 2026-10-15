@@ -16,7 +16,7 @@ Per case:
   1. The harness creates the run's mock world itself (fixtures and canned tool
      responses), so the attack is in place before the agent starts and an agent
      that never initialises a world still acts in the right one.
-  2. docker run --rm --name creuset-test-<run_id>
+  2. docker run --rm --name creuset-test-<run_id> --label creuset.run=<run_id> ...
        --network creuset-net            # internal: true — no internet
        --read-only --tmpfs /tmp:...     # immutable filesystem; scratch is noexec
        --cap-drop ALL --security-opt no-new-privileges --pids-limit 256
@@ -39,6 +39,7 @@ Usage:
   python sandbox/run_test.py --library my_cases.yaml --test-id ORD-001 \\
       --agent-image my-agent:1.4 --variant v1.4
   python sandbox/run_test.py --check          # preflight + isolation probe only
+  python sandbox/run_test.py --cleanup        # remove containers a crash left behind
 """
 
 from __future__ import annotations
@@ -97,6 +98,11 @@ if not re.fullmatch(r"(?:[a-z0-9][a-z0-9_-]{0,31})?", PREFIX):
 NETWORK = f"{PREFIX}creuset-net"
 MOCK_CONTAINER = f"{PREFIX}mock-services"
 LLM_PROXY_CONTAINER = f"{PREFIX}llm-proxy"
+# Every container the harness starts carries these labels, so whatever a crash,
+# a Ctrl-C or a cancelled CI job leaves behind can be found and removed:
+# creuset.stack tells two stacks apart (CREUSET_PREFIX), creuset.batch one
+# loader's containers from another's. Compose's services carry none of them.
+STACK_LABEL = f"creuset.stack={PREFIX}creuset"
 INFRA_CONTAINERS = (LLM_PROXY_CONTAINER, MOCK_CONTAINER)
 AGENT_IMAGE = os.getenv("AGENT_IMAGE_TAG", "creuset-agent:latest")   # the bundled agent
 TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "180"))
@@ -358,6 +364,41 @@ def _docker(args: List[str], timeout: int = 60, input: Optional[str] = None) -> 
     )
 
 
+def _labels(run_id: Optional[str] = None, batch_id: Optional[str] = None) -> List[str]:
+    out = ["--label", STACK_LABEL]
+    if run_id:
+        out += ["--label", f"creuset.run={run_id}"]
+    if batch_id:
+        out += ["--label", f"creuset.batch={batch_id}"]
+    return out
+
+
+_BATCH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def remove_containers(batch_id: Optional[str] = None) -> int:
+    """
+    Force-remove the containers the harness started: one batch's, or with no
+    batch every one on this stack. Removing an agent's container also ends the
+    `docker run` waiting on it, so a stopped batch's workers return at once.
+    Returns how many went.
+    """
+    filters = ["--filter", f"label={STACK_LABEL}"]
+    if batch_id is not None:
+        if not _BATCH_ID.fullmatch(batch_id):
+            return 0   # an empty or odd value must never widen the filter
+        filters += ["--filter", f"label=creuset.batch={batch_id}"]
+    try:
+        listed = _docker(["ps", "-aq", *filters], timeout=30)
+        ids = listed.stdout.split() if listed.returncode == 0 else []
+        if not ids:
+            return 0
+        removed = _docker(["rm", "-f", *ids], timeout=120)
+        return len(removed.stdout.split())
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+
+
 def load_cases(path: Path) -> List[Dict[str, Any]]:
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
@@ -493,7 +534,7 @@ def stale_image_problem(image: str) -> Optional[str]:
 
 def _check_sources(image: str, ident: str, host: Dict[str, str]) -> Optional[str]:
     name = f"creuset-check-{uuid.uuid4().hex[:8]}"
-    cmd = ["run", "--rm", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
+    cmd = ["run", "--rm", "--name", name, *_labels(), "--network", "none", "--read-only", "--cap-drop", "ALL",
            "--security-opt", "no-new-privileges", "--no-healthcheck",
            "--entrypoint", "python", ident, "-c", AGENT_DIGEST_SCRIPT, *host]
     try:
@@ -625,7 +666,7 @@ def isolation_probe() -> Dict[str, Any]:
     if inspect.returncode != 0 or not probe_image:
         return {"ok": False, "error": f"container '{MOCK_CONTAINER}' not found; start the infrastructure first"}
     proc = _docker(
-        ["run", "--rm", *_sandbox_flags(), "--entrypoint", "python", probe_image, "-c", _PROBE],
+        ["run", "--rm", *_labels(), *_sandbox_flags(), "--entrypoint", "python", probe_image, "-c", _PROBE],
         timeout=60,
     )
     try:
@@ -724,12 +765,14 @@ def fetch_audit(run_id: str) -> Optional[List[Dict[str, Any]]]:
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 
-def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = None) -> Dict[str, Any]:
+def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = None,
+             batch_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Run one test case in a fresh sandbox container. Always returns a transcript
     dict; anything that goes wrong is a non-"completed" status (fail-closed).
 
-    `subject` defaults to the bundled agent at `variant`.
+    `subject` defaults to the bundled agent at `variant`. `batch_id` labels the
+    container, so the batch can remove it if it is stopped mid-run.
     """
     subject = subject or Subject(image=AGENT_IMAGE, variant=variant, bundled=True)
     case_id = case.get("id") or case.get("test_id") or "CUSTOM"
@@ -768,7 +811,7 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
         # forbidden_tools, patterns...), which an agent could otherwise read.
         scenario_path.write_text(json.dumps(agent_scenario(case)), encoding="utf-8")
 
-        cmd = ["run", "--rm", "--name", container, *flags]
+        cmd = ["run", "--rm", "--name", container, *_labels(run_id, batch_id), *flags]
         # The harness's variables, then the agent's own settings, which
         # parse_agent_env() has already kept off every name the harness sets.
         harness_env = _container_env(run_id, subject.variant)
@@ -869,8 +912,14 @@ def main(
                                                   help="KEY=VALUE lines for the agent's container. Never secrets."),
     save: bool = typer.Option(True, "--save/--no-save", help="Save transcript to logs/"),
     check: bool = typer.Option(False, "--check", help="Only run preflight + isolation probe"),
+    cleanup: bool = typer.Option(False, "--cleanup", help="Remove every container the harness started on this "
+                                                          "stack (left behind by a crash), then exit."),
 ) -> None:
     """Run a single test case through the sandbox and print the transcript JSON on stdout."""
+    if cleanup:
+        removed = remove_containers()
+        console.print(f"[green]✓[/green] Removed {removed} leftover harness container(s).")
+        raise typer.Exit(code=0)
     try:
         subject = make_subject(variant, agent_image, parse_agent_env(agent_env or (), agent_env_file))
     except (OSError, ValueError) as e:

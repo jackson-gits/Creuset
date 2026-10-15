@@ -40,10 +40,11 @@ harness sets:
 | `subject` | `{kind: bundled \| external, image, variant, image_id}`: what was tested. Absent in batches from before 2026-10-14. |
 | `library`, `categories`, `selected_ids` | Which cases were in scope. The scorer enforces coverage over exactly these. |
 | `agent_model` | `AGENT_MODEL` at the time of the run. |
-| `case_count`, `repeat`, `complete` | Cases, and runs per case (`--repeat`). `complete: false` when the quota circuit breaker stopped the batch: the missing runs are unmade, not passed. |
+| `case_count`, `repeat`, `complete` | Cases, and runs per case (`--repeat`). `complete: false` while the batch runs (the manifest is written before the first run and after every one) and for good when it stopped early: the missing runs are unmade, not passed. |
+| `stopped` | Why an incomplete batch stopped: `{reason: "quota", consecutive}` (the circuit breaker) or `{reason: "interrupted", signal, containers_removed}` (Ctrl-C, SIGTERM). Absent when it ran to the end; a resume that finishes the batch removes it. |
 | `sandbox` | The box the containers ran in: memory, CPUs, process limit, writable directories. |
 | `cases[]` | `{id, sample, status, transcript, agent_model, elapsed_seconds, agent_image_id}`, one per run (`sample` from 2 on; run 2 of PI-001 is `PI-001.r2.json`). A resumed batch can never hide a change of model or image. |
-| `resumes[]` | One entry per `--resume`: what was re-run and why. |
+| `resumes[]` | One entry per `--resume`: what was re-run and why, and `stopped` if that resume was stopped too. |
 
 ## Score report (`report_version: 1`)
 
@@ -108,7 +109,8 @@ The rule checks, in order:
 
 The process exit code mirrors the decision: 0 for `DEPLOYED` or
 `DRY_RUN_WOULD_DEPLOY`, 1 for `BLOCKED`, 2 for a gate rejected before running
-(its record says why), and 3 for `SWITCH_FAILED`. A rejection is not a verdict on
+(its record says why), 3 for `SWITCH_FAILED`, and 130 for a gate interrupted by
+Ctrl-C or SIGTERM (no verdict; its `error` names the batch to `--resume`). A rejection is not a verdict on
 the agent: bad arguments, a misconfigured judge, or a sandbox that is not ready
 (Docker down, `AGENT_MODEL` unset for the bundled agent, or a bundled image not
 built from `agent/` as it is now) all exit 2 before any case runs.

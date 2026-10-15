@@ -37,11 +37,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import uuid
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import typer
 import yaml
@@ -65,7 +69,7 @@ sys.path.insert(0, str(_ROOT / "judge"))
 import call_policy  # noqa: E402
 from run_test import (  # noqa: E402
     Subject, env_fingerprint, image_content, image_id, limits_from_env, make_subject, parse_agent_env,
-    preflight, run_case,
+    preflight, remove_containers, run_case,
 )
 
 app = typer.Typer(add_completion=False)
@@ -279,6 +283,82 @@ def _entry(case_id: str, transcript: Dict[str, Any], path: Path, sample: int = 1
     return entry
 
 
+_POLL_SECONDS = 0.5
+# How long a stopped batch waits for runs already in flight. Their containers
+# are removed first, so the `docker run` each one waits on returns at once.
+_DRAIN_SECONDS = 30
+
+
+class BatchInterrupted(KeyboardInterrupt):
+    """
+    Ctrl-C or SIGTERM stopped a batch. Its manifest is written first, so every
+    finished run survives for --resume. Still a KeyboardInterrupt, so a caller
+    running batches in a loop (evaluate/run_eval.py) stops too.
+    """
+
+    def __init__(self, manifest_path: Path) -> None:
+        super().__init__(f"batch interrupted; finish it with --resume {manifest_path.parent}")
+        self.manifest_path = manifest_path
+
+
+def write_json(path: Path, data: Any) -> None:
+    """Through a temp file and a rename: a kill mid-write leaves the old file or the new one, never half."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            # Windows refuses to replace a file another process has open (the
+            # results browser, a virus scan) for a moment.
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+
+@contextmanager
+def _recording_signals(state: Dict[str, str]) -> Iterator[None]:
+    """
+    While a batch runs, SIGINT, SIGTERM and (Windows) SIGBREAK only record
+    themselves in state["signal"], and the batch loop polls for it.
+
+    By default Ctrl-C raises KeyboardInterrupt wherever the main thread happens
+    to be, inside concurrent.futures' locks included, and SIGTERM (a cancelled
+    CI job, `timeout`) ends the process outright, leaving its `docker run`
+    children spending quota. Recording, then acting at a safe point, avoids
+    both. Off the main thread, where handlers cannot be set, it does nothing.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum: int, _frame: Any) -> None:
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        state.setdefault("signal", name)   # a plain store: nothing here can deadlock
+
+    previous: Dict[int, Any] = {}
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (OSError, ValueError, RuntimeError):
+            continue
+    try:
+        yield
+    finally:
+        for sig, old in previous.items():
+            try:
+                signal.signal(sig, old if old is not None else signal.SIG_DFL)
+            except (OSError, ValueError, TypeError, RuntimeError):
+                pass
+
+
 def _execute_cases(
     runs: List[Run],
     variant: str,
@@ -288,13 +368,48 @@ def _execute_cases(
     description: str,
     subject: Optional[Subject] = None,
     repeat: int = 1,
+    checkpoint: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    stopped: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Run each (case, sample) in its own sandbox container, in parallel, writing
     one transcript per run into `batch_dir`. Returns manifest entries sorted by
-    id and sample, stopping early if the provider's quota circuit breaker trips.
+    id and sample.
+
+    Stops early when the provider's quota circuit breaker trips, or on Ctrl-C /
+    SIGTERM, and says why in `stopped` (filled in when given). An interrupt
+    cancels the queued runs and removes the batch's containers; a run it cut
+    off is not recorded, so --resume makes it again. `checkpoint(entries)` runs
+    after every recorded run, so the manifest on disk is never more than one
+    run behind, however the process ends.
     """
+    stopped = {} if stopped is None else stopped
+    # Labels this execution's containers: unique per run AND per resume, so one
+    # loader's cleanup can never touch another's.
+    batch_id = f"{time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:12]}"
     entries: List[Dict[str, Any]] = []
+    signals: Dict[str, str] = {}
+    stop = threading.Event()
+
+    def one(case: Dict[str, Any], sample: int) -> Optional[Tuple[Dict[str, Any], Path]]:
+        # Written HERE, in the worker: a run that finishes while the main thread
+        # handles an interrupt would otherwise be lost and paid for again.
+        if stop.is_set():
+            return None
+        try:
+            transcript = run_case(case, variant, subject, batch_id=batch_id)
+        except Exception as e:  # pylint: disable=broad-except - never lose a case
+            transcript = {"test_id": case["id"], "variant": variant, "status": "harness_error",
+                          "error": f"{type(e).__name__}: {e}", "tool_calls": [], "steps": [],
+                          "service_audit": None, "output": ""}
+        if stop.is_set() and transcript.get("status") != "completed":
+            return None   # cut off by the stop: not a result
+        if repeat > 1:
+            transcript["sample"] = sample   # harness-owned: which of the N runs this was
+        path = batch_dir / f"{run_key(case['id'], sample)}.json"
+        write_json(path, transcript)
+        return transcript, path
+
     # A live spinner writes a frame per refresh; piped to a file or a CI log that
     # is thousands of useless lines, so animate only on a real terminal.
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(),
@@ -303,55 +418,101 @@ def _execute_cases(
                   # console.is_terminal is not enough: FORCE_COLOR (set by many
                   # CI runners and agent harnesses) makes rich claim a terminal
                   # even when stdout is a file.
-                  disable=not sys.stdout.isatty()) as progress:
+                  disable=not sys.stdout.isatty()) as progress, _recording_signals(signals):
         task = progress.add_task(description, total=len(runs))
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(run_case, case, variant, subject): (case, sample) for case, sample in runs}
-            consecutive_quota_errors = 0
-            for fut in as_completed(futures):
-                case, sample = futures[fut]
-                try:
-                    transcript = fut.result()
-                except Exception as e:  # pylint: disable=broad-except - never lose a case
-                    transcript = {"test_id": case["id"], "variant": variant, "status": "harness_error",
-                                  "error": f"{type(e).__name__}: {e}", "tool_calls": [], "steps": [],
-                                  "service_audit": None, "output": ""}
-                if repeat > 1:
-                    transcript["sample"] = sample   # harness-owned: which of the N runs this was
-                key = run_key(case["id"], sample)
-                path = batch_dir / f"{key}.json"
-                path.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
-                entries.append(_entry(case["id"], transcript, path, sample))
-                ok = transcript.get("status") == "completed"
-                tools = sorted({str(t.get("tool")) for t in transcript.get("tool_calls") or []
-                                if isinstance(t, dict)})
-                progress.console.print(
-                    f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {key:<10} "
-                    f"{transcript.get('status', '?'):<16} tools={tools}"
-                    + ("" if ok else f"  [red]{str(transcript.get('error', ''))[:120]}[/red]"))
-                if on_result:
-                    on_result(case, transcript, path)
-                progress.advance(task)
+        pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="creuset-run")
+        futures: Dict[Future, Run] = {}
+        recorded: set = set()
 
-                # Circuit breaker. Once the provider's quota is gone every
-                # remaining case fails identically, which wastes the rest of the
-                # run AND looks like a perfect detection rate downstream (the
-                # judge fails a missing transcript closed). Stop and say why.
-                if _is_quota_error(transcript):
-                    consecutive_quota_errors += 1
-                else:
-                    consecutive_quota_errors = 0
-                if consecutive_quota_errors >= _QUOTA_BREAKER:
-                    for pending in futures:
-                        pending.cancel()
-                    progress.console.print(
-                        f"[bold red]⛔ Aborting batch: {consecutive_quota_errors} consecutive "
-                        f"provider rate-limit failures.[/bold red] The remaining "
-                        f"{len(runs) - len(entries)} run(s) were not made - results from this "
-                        f"batch are incomplete, not a measurement. Finish it with "
-                        f"[bold]--resume {batch_dir}[/bold] once the quota resets; every case "
-                        f"that did complete is kept.")
-                    break
+        def record(fut: Future, live: bool) -> Optional[Dict[str, Any]]:
+            recorded.add(fut)
+            case, sample = futures[fut]
+            key = run_key(case["id"], sample)
+            try:
+                result = fut.result()
+            except Exception as e:  # pylint: disable=broad-except - e.g. the disk filled up
+                progress.console.print(f"  [red]✗ {key}: could not record the run: {e}[/red]")
+                return None
+            if result is None:
+                return None   # never started, or cut off by a stop
+            transcript, path = result
+            entries.append(_entry(case["id"], transcript, path, sample))
+            ok = transcript.get("status") == "completed"
+            tools = sorted({str(t.get("tool")) for t in transcript.get("tool_calls") or []
+                            if isinstance(t, dict)})
+            progress.console.print(
+                f"  {'[green]✓[/green]' if ok else '[red]✗[/red]'} {key:<10} "
+                f"{transcript.get('status', '?'):<16} tools={tools}"
+                + ("" if ok else f"  [red]{str(transcript.get('error', ''))[:120]}[/red]"))
+            if live and on_result:
+                on_result(case, transcript, path)
+            progress.advance(task)
+            if checkpoint:
+                checkpoint(sorted(entries, key=lambda e: (e["id"], int(e.get("sample", 1)))))
+            return transcript
+
+        def interrupt(signal_name: str) -> None:
+            stopped.clear()
+            stopped.update({"reason": "interrupted", "signal": signal_name})
+            stop.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+            progress.console.print(f"[bold yellow]⏹ {signal_name}: stopping the batch.[/bold yellow] "
+                                   "Queued runs will not start; removing this batch's containers.")
+            stopped["containers_removed"] = remove_containers(batch_id)
+
+        try:
+            # Inside the try: an interrupt between two submits must still cancel
+            # what was queued, or the pool would run all of it before exiting.
+            for run in runs:
+                futures[pool.submit(one, *run)] = run
+            pending = set(futures)
+            consecutive_quota_errors = 0
+            while pending and not stopped:
+                done, pending = wait(pending, timeout=_POLL_SECONDS, return_when=FIRST_COMPLETED)
+                for fut in sorted(done, key=list(futures).index):
+                    transcript = record(fut, live=True)
+                    if transcript is None:
+                        continue
+                    # Circuit breaker. Once the provider's quota is gone every
+                    # remaining case fails identically, which wastes the rest of
+                    # the run AND looks like a perfect detection rate downstream
+                    # (the judge fails a missing transcript closed). Stop and say why.
+                    consecutive_quota_errors = consecutive_quota_errors + 1 if _is_quota_error(transcript) else 0
+                    if consecutive_quota_errors >= _QUOTA_BREAKER and not stopped:
+                        stopped.update({"reason": "quota", "consecutive": consecutive_quota_errors})
+                        stop.set()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                if signals.get("signal") and not stopped:
+                    interrupt(signals["signal"])
+        except KeyboardInterrupt:   # off the main thread no handler records it
+            interrupt("SIGINT")
+        finally:
+            stop.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        # Runs already in flight: keep whatever they finish (a quota stop waits
+        # for them; an interrupt has removed their containers and waits briefly).
+        remaining = {f for f in futures if f not in recorded and not f.cancelled()}
+        deadline = time.monotonic() + _DRAIN_SECONDS if stopped.get("reason") == "interrupted" else None
+        while remaining:
+            if signals.get("signal") and stopped.get("reason") != "interrupted":
+                interrupt(signals["signal"])   # Ctrl-C while a quota stop drains
+                deadline = time.monotonic() + _DRAIN_SECONDS
+            left = _POLL_SECONDS if deadline is None else min(_POLL_SECONDS, deadline - time.monotonic())
+            if left <= 0:
+                break
+            done, remaining = wait(remaining, timeout=left)
+            for fut in sorted(done, key=list(futures).index):
+                record(fut, live=False)
+
+        if stopped.get("reason") == "quota":
+            progress.console.print(
+                f"[bold red]⛔ Aborting batch: {stopped['consecutive']} consecutive "
+                f"provider rate-limit failures.[/bold red] The remaining "
+                f"{len(runs) - len(entries)} run(s) were not made - results from this "
+                f"batch are incomplete, not a measurement. Finish it with "
+                f"[bold]--resume {batch_dir}[/bold] once the quota resets; every case "
+                f"that did complete is kept.")
 
     entries.sort(key=lambda e: (e["id"], int(e.get("sample", 1))))
     return entries
@@ -385,10 +546,6 @@ def run_suite(
     started_image_id = image_id(subject.image)
 
     runs = [(case, sample) for case in cases for sample in range(1, repeat + 1)]
-    entries = _execute_cases(runs, variant, batch_dir, workers, on_result,
-                             f"[cyan]{variant}[/cyan] × {library.stem}"
-                             + (f" × {repeat} runs" if repeat > 1 else ""), subject, repeat)
-
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "ts": int(time.time()),
@@ -407,13 +564,28 @@ def run_suite(
         # Runs per case. An agent that resists an attack 7 times in 10 is not
         # safe, and one run cannot tell 7-in-10 from 10-in-10.
         "repeat": repeat,
-        # False when the circuit breaker stopped the batch early: the missing
-        # runs are unmade, not passed or failed.
-        "complete": len(entries) == len(cases) * repeat,
-        "cases": entries,
+        # False until every run is in, and for good when the batch stopped
+        # early: the missing runs are unmade, not passed or failed.
+        "complete": False,
+        "cases": [],
     }
+    # Written before the first run and after every one: a batch killed outright
+    # (closed terminal, OOM, SIGKILL) is still resumable, never a folder of
+    # transcripts nothing can finish.
     manifest_path = batch_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    write_json(manifest_path, manifest)
+    stopped: Dict[str, Any] = {}
+    entries = _execute_cases(runs, variant, batch_dir, workers, on_result,
+                             f"[cyan]{variant}[/cyan] × {library.stem}"
+                             + (f" × {repeat} runs" if repeat > 1 else ""), subject, repeat,
+                             checkpoint=lambda done: write_json(manifest_path, {**manifest, "cases": done}),
+                             stopped=stopped)
+    manifest.update({"complete": len(entries) == len(cases) * repeat, "cases": entries})
+    if stopped:
+        manifest["stopped"] = stopped   # why it is incomplete: "quota" or "interrupted"
+    write_json(manifest_path, manifest)
+    if stopped.get("reason") == "interrupted":
+        raise BatchInterrupted(manifest_path)
     return manifest_path
 
 
@@ -622,12 +794,18 @@ def resume_suite(
             console.print(f"[red]✗[/red] {problem}")
         raise RuntimeError("Preflight failed; nothing was run.")
 
+    def merged_with(new_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged = {**prior, **{_entry_key(e): e for e in new_entries}}
+        return sorted(merged.values(), key=lambda e: (e["id"], int(e.get("sample", 1))))
+
+    stopped: Dict[str, Any] = {}
     new_entries = _execute_cases(todo, variant, batch_dir, workers, on_result,
                                  f"[cyan]{variant}[/cyan] × {library.stem} [dim](resume)[/dim]",
-                                 subject, repeat)
-
-    merged = {**prior, **{_entry_key(e): e for e in new_entries}}
-    entries = sorted(merged.values(), key=lambda e: (e["id"], int(e.get("sample", 1))))
+                                 subject, repeat,
+                                 checkpoint=lambda done: write_json(
+                                     manifest_path, {**manifest, "complete": False, "cases": merged_with(done)}),
+                                 stopped=stopped)
+    entries = merged_with(new_entries)
     manifest.update({
         "ts": int(time.time()),
         "agent_model": current_model,
@@ -649,8 +827,16 @@ def resume_suite(
         "agent_image_id": current_image,
         "reran": sorted(reasons),
         "reasons": reasons,
+        **({"stopped": stopped} if stopped else {}),
     })
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    # The batch's own `stopped` describes how it stands now, not how an earlier
+    # attempt ended.
+    manifest.pop("stopped", None)
+    if stopped:
+        manifest["stopped"] = stopped
+    write_json(manifest_path, manifest)
+    if stopped.get("reason") == "interrupted":
+        raise BatchInterrupted(manifest_path)
     return manifest_path
 
 
@@ -742,6 +928,8 @@ def main(
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             console.print(f"[red]✗ {e}[/red]")
             raise typer.Exit(code=2)
+        except BatchInterrupted as e:
+            _interrupted(e.manifest_path)
         _summarise(manifest_path)
         raise typer.Exit(code=0)
 
@@ -794,9 +982,21 @@ def main(
         console.print(f"[yellow]⚠ The bundled agent keeps no conversation history: {multi_turn} run as "
                       f"single messages, without their earlier turns.[/yellow]")
 
-    manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
-                              subject=subject, repeat=repeat)
+    try:
+        manifest_path = run_suite(selected, variant, library, workers, category, selected_ids=ids,
+                                  subject=subject, repeat=repeat)
+    except BatchInterrupted as e:
+        _interrupted(e.manifest_path)
     _summarise(manifest_path)
+
+
+def _interrupted(manifest_path: Path) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    removed = (manifest.get("stopped") or {}).get("containers_removed", 0)
+    console.print(f"[yellow]⏹ Interrupted.[/yellow] {len(manifest.get('cases') or [])} finished run(s) kept, "
+                  f"{removed} container(s) removed. Finish the batch with:\n"
+                  f"  python attacks/loader.py --resume {manifest_path.parent}")
+    raise typer.Exit(code=130)
 
 
 if __name__ == "__main__":

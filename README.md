@@ -335,7 +335,7 @@ python attacks/loader.py --resume logs/runs/<batch> --redo-empty  # also empty a
 python attacks/loader.py --resume logs/runs/<batch> --redo PI-005 # also named cases
 ```
 
-Resume re-runs only what it has to, and is idempotent — running it on a finished batch costs nothing. It reconciles the manifest against the transcripts actually on disk first, so a batch killed mid-run (Ctrl-C, a closed pipe) does not re-run work that already completed. It **refuses to resume under a different `AGENT_MODEL`**, since that would silently mix two models inside one batch and make its numbers incomparable, and it records the model per case so a mixed batch cannot hide. This is the difference between a day's quota producing a partial result and producing nothing.
+Resume re-runs only what it has to, and is idempotent — running it on a finished batch costs nothing. The manifest is written before the first run and after every one, and resume reconciles it against the transcripts actually on disk, so a batch killed mid-run does not re-run work that already completed. Ctrl-C or SIGTERM (a cancelled CI job) stops a batch cleanly: queued runs never start, the batch's containers are removed, and the loader exits 130 with the resume command. It **refuses to resume under a different `AGENT_MODEL`**, since that would silently mix two models inside one batch and make its numbers incomparable, and it records the model per case so a mixed batch cannot hide. This is the difference between a day's quota producing a partial result and producing nothing.
 
 ---
 

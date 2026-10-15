@@ -71,7 +71,7 @@ def test_run_suite_names_each_run_and_marks_its_sample(tmp_path, monkeypatch):
     monkeypatch.setattr(loader, "image_id", lambda image: "sha256:" + "a" * 64)
     seen = []
 
-    def fake_run_case(case, variant, subject):
+    def fake_run_case(case, variant, subject, batch_id=None):
         seen.append(case["id"])
         return dict(CLEAN)
     monkeypatch.setattr(loader, "run_case", fake_run_case)

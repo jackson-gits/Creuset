@@ -26,6 +26,8 @@ Exit codes (stable; CI depends on them):
   2  rejected before anything ran (bad version/variant/image, bad flags,
      a sandbox that is not ready: Docker down, a stale bundled image)
   3  PASS, but the deploy did not complete: the gated build is NOT live
+  130  interrupted (Ctrl-C, SIGTERM): no verdict; the batch's finished runs
+       are kept, and the record names the batch to --resume
 
 Usage:
   python gate/run_gate.py --version v1.2.3
@@ -39,11 +41,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 import typer
 from dotenv import load_dotenv
@@ -72,6 +76,10 @@ _LOADER_SCRIPT = _ROOT / "attacks" / "loader.py"
 _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"
 
 EXIT_PASS, EXIT_BLOCKED, EXIT_REJECTED, EXIT_DEPLOY_FAILED = 0, 1, 2, 3
+EXIT_INTERRUPTED = 130
+# How long a phase's script gets to stop cleanly once interrupted: the loader
+# removes its containers and writes its manifest, which takes seconds.
+_CHILD_GRACE_SECONDS = 60
 
 sys.path.insert(0, str(_ROOT / "deploy"))
 sys.path.insert(0, str(_ROOT / "sandbox"))
@@ -86,6 +94,50 @@ from switch import StateError, inactive_slot, load_state, validate_build  # noqa
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _child(cmd: List[str]) -> int:
+    """
+    Run one phase's script and return its exit code.
+
+    subprocess.run kills its child 0.25 s after a Ctrl-C, before the loader
+    could remove its containers or write its manifest. Here the child gets
+    _CHILD_GRACE_SECONDS to stop on its own first.
+    """
+    proc = subprocess.Popen(cmd, cwd=str(_ROOT))
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        # A terminal's Ctrl-C reaches the child too (one process group); a
+        # SIGTERM sent to the gate alone does not, so it is passed on. Windows
+        # cannot deliver SIGTERM to a process at all.
+        if os.name != "nt":
+            try:
+                proc.send_signal(signal.SIGTERM)
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=_CHILD_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise
+
+
+@contextmanager
+def _sigterm_interrupts() -> Iterator[None]:
+    """SIGTERM (a cancelled CI job) as a KeyboardInterrupt, so the gate stops the way Ctrl-C stops it."""
+    def handler(signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt(signal.Signals(signum).name)
+    try:
+        previous = signal.signal(signal.SIGTERM, handler)
+    except (OSError, ValueError, RuntimeError):   # not the main thread
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+
 
 def _newest_manifest(since: float) -> Optional[Path]:
     """
@@ -117,9 +169,10 @@ def _run_attack_suite(variant: str, library: Optional[Path] = None,
     console.print(f"[dim]{' '.join(cmd)}[/dim]")
 
     started = time.time()
-    result = subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
-
-    if result.returncode != 0:
+    returncode = _child(cmd)
+    if returncode == EXIT_INTERRUPTED:
+        raise KeyboardInterrupt("the attack suite was interrupted")
+    if returncode != 0:
         console.print("[red]✗ Attack suite runner failed (non-zero exit).[/red]")
         return None
 
@@ -158,7 +211,7 @@ def _run_scorer(manifest: Path, skip_model_judge: bool,
     # score.py puts its own directory on sys.path, so it runs from anywhere.
     # Its exit code is 1 for an ordinary gate FAIL, so the report file — not the
     # exit code — is what says whether scoring happened.
-    subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
+    _child(cmd)
 
     if not report_path.exists():
         console.print("[red]✗ Score report not written. Treating as gate FAIL.[/red]")
@@ -203,6 +256,19 @@ def _read_manifest(manifest_path: Optional[Path]) -> Optional[Dict[str, Any]]:
     except (OSError, ValueError):
         return None
     return manifest if isinstance(manifest, dict) else None
+
+
+def _interrupted(version: str, variant: str, when: str, manifest: Optional[Path],
+                 junit: Optional[Path], summary_md: Optional[Path]) -> None:
+    """Record an interrupted gate (no verdict: nothing was decided) and exit 130."""
+    error = f"Interrupted {when}; no verdict."
+    if manifest is not None:
+        error += f" Finished runs are kept: python attacks/loader.py --resume {manifest.parent}"
+    record = _write_gate_record(version, variant, None, "FAIL", "BLOCKED", error=error,
+                                manifest=str(manifest) if manifest else None)
+    _publish(None, "FAIL", "BLOCKED", error, junit, summary_md)
+    console.print(f"\n[bold yellow]⏹ Gate interrupted[/bold yellow] {when}. Audit: {record}")
+    raise typer.Exit(code=EXIT_INTERRUPTED)
 
 
 def _write_gate_record(
@@ -410,6 +476,15 @@ def main(
     Tests the candidate agent version, scores results, and flips the
     blue-green router only if all safety thresholds are met.
     """
+    with _sigterm_interrupts():
+        _gate(version, variant, skip_model_judge, dry_run, library, agent_image, agent_env, agent_env_file,
+              repeat, waivers, junit, summary_md)
+
+
+def _gate(version: str, variant: Optional[str], skip_model_judge: bool, dry_run: bool,
+          library: Optional[Path], agent_image: Optional[str], agent_env: Optional[List[str]],
+          agent_env_file: Optional[Path], repeat: int, waivers: Optional[Path],
+          junit: Optional[Path], summary_md: Optional[Path]) -> None:
     _variant = variant or version
     start_ts = time.time()
 
@@ -462,7 +537,11 @@ def main(
         suite_args += ["--agent-env-file", str(agent_env_file)]
     if repeat > 1:
         suite_args += ["--repeat", str(repeat)]
-    manifest = _run_attack_suite(_variant, library, agent_image, suite_args)
+    try:
+        manifest = _run_attack_suite(_variant, library, agent_image, suite_args)
+    except KeyboardInterrupt:
+        _interrupted(version, _variant, "while running the attack suite", _newest_manifest(start_ts),
+                     junit, summary_md)
 
     if manifest is None:
         # Fail-closed: sandbox runner failure = gate FAIL
@@ -479,7 +558,10 @@ def main(
     tested_content = tested_image_content(manifest)
 
     # ── Step 2: Score ─────────────────────────────────────────────────────────
-    score_report = _run_scorer(manifest, skip_model_judge, waivers)
+    try:
+        score_report = _run_scorer(manifest, skip_model_judge, waivers)
+    except KeyboardInterrupt:
+        _interrupted(version, _variant, "while scoring", manifest, junit, summary_md)
 
     if score_report is None:
         record = _write_gate_record(
