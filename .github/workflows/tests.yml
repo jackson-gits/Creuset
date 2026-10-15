@@ -50,21 +50,21 @@ jobs:
           AGENT_MODEL: ci-placeholder
         run: docker compose config --quiet
 
-      # Each provider profile goes through the entrypoint script compose mounts
-      # and must give a config nginx accepts. The default must also render
-      # byte-for-byte the config the published results ran behind (the image's
-      # real envsubst, not the Python emulation in the unit tests), and a
-      # profile the script refuses must stop the container before nginx starts.
+      # Each provider profile goes through the image compose runs (config and
+      # entrypoint script baked in by deploy/llm-proxy/Dockerfile) and must give
+      # a config nginx accepts. The default must also render byte-for-byte the
+      # config the published results ran behind (the image's real envsubst, not
+      # the Python emulation in the unit tests), and a profile the script
+      # refuses must stop the container before nginx starts.
       - name: llm-proxy nginx config is valid
         run: |
           set -eu
+          docker build -q -t creuset-llm-proxy:ci deploy/llm-proxy
           render() {  # nginx -t one profile; arguments are `-e NAME=value` pairs
             RENDERED="$(mktemp -d)"
             docker run --rm -e LLM_PROXY_RESOLVER=127.0.0.11 "$@" \
-              -v "$PWD/deploy/llm-proxy:/etc/nginx/templates:ro" \
-              -v "$PWD/deploy/llm-proxy/05-creuset-validate.envsh:/docker-entrypoint.d/05-creuset-validate.envsh:ro" \
               -v "$RENDERED:/etc/nginx/conf.d" \
-              nginx:1.31-alpine nginx -t
+              creuset-llm-proxy:ci nginx -t
           }
 
           echo "::group::default (Groq), byte-identical to the published config"
