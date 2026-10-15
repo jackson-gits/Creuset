@@ -28,7 +28,8 @@ commits follow Conventional Commits (CONTRIBUTING.md); the early history is info
 ```
 gate/run_gate.py --version X [--variant V] [--skip-model-judge] [--dry-run]
                  [--library L] [--agent-image IMG]      (IMG needs --dry-run)
- ├─ refuses up front (exit 2): bad version/variant/image/library, misconfigured judge
+ ├─ refuses up front (exit 2): bad version/variant/image/library, misconfigured judge,
+ │   an unready sandbox (preflight: Docker, AGENT_MODEL, bundled image ≠ agent/ bytes)
  ├─ attacks/loader.py --variant V [--library L] [--cases IDs] [--category C] [--agent-image IMG]
  │   │  validates the library against schemas/library.v1.json, then runs cases in a
  │   │  ThreadPoolExecutor (GATE_WORKERS) — one container per case
@@ -125,9 +126,18 @@ Other entry points:
   images are kept locally as `creuset-agent:measured-2026-09-20`,
   `creuset-mock-services:measured-2026-09-20`, `creuset-router:2026-09-20`. No curl in any
   image any more: healthchecks use Python.
+- **The bundled image must be built from `agent/` as it is**: `preflight()` compares the
+  bytes of `agent/*.py`, `variants/*.txt` and the requirements with the image's `/app`
+  copies (`stale_image_problem`), so an edited prompt without a rebuild is refused (gate
+  exit 2) instead of running the old prompt under the new name. Running an older build on
+  purpose: `CREUSET_ALLOW_STALE_AGENT=1`. The measured agent image differs from today's
+  `agent/` only in `run_agent.py`'s variant-name check (security pass `d0b66d6`); the
+  prompts are byte-identical. `AGENT_MODEL` unset is also a preflight problem for the
+  bundled agent (external images get it empty; there is no gpt-4o-mini default any more).
 - **`scripts/doctor.py`** is the first thing to run when something is off: config (never
-  printing a secret), Docker/Compose, network internal, container health, images older than
-  their source, containers older than their image. `--probe` = isolation probe, `--online`
+  printing a secret), Docker/Compose, network internal, container health, the bundled
+  image against `agent/`'s bytes (other images: older than their source), containers
+  older than their image. `--probe` = isolation probe, `--online`
   = `/models` through llm-proxy and at the judge (no tokens).
 - **Right after Docker Desktop starts, container networking can be broken for a minute or
   two**: on 2026-10-14 a `pip install` in a build failed ("Network is unreachable") and

@@ -164,6 +164,7 @@ def test_the_gate_writes_junit_summary_and_the_github_job_summary(tmp_path, monk
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"cases": []}), encoding="utf-8")
     monkeypatch.setattr(run_gate, "_run_attack_suite", lambda *a, **k: manifest)
+    monkeypatch.setattr(run_gate, "preflight", lambda subject=None: [])
     monkeypatch.setattr(run_gate, "_run_scorer", lambda *a, **k: {**_report(), "gate_verdict": "PASS", "valid": False})
     step_summary = tmp_path / "step_summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step_summary))

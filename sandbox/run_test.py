@@ -209,7 +209,9 @@ def _container_env(run_id: str, variant: str) -> Dict[str, str]:
         # the gateway's root (llm-proxy pointed at api.anthropic.com).
         "ANTHROPIC_BASE_URL": os.getenv("AGENT_ANTHROPIC_BASE", "http://llm-proxy:11434"),
         "ANTHROPIC_API_KEY": "sandbox-placeholder-key",
-        "AGENT_MODEL": os.getenv("AGENT_MODEL", "gpt-4o-mini"),
+        # Empty when unset: preflight refuses that for the bundled agent, and an
+        # external one may not use a model at all.
+        "AGENT_MODEL": os.getenv("AGENT_MODEL", ""),
         # The bundled agent's knobs. Harmless to any other image.
         "MOCK_SERVICES_HOST": "mock-services",
         "MOCK_SERVICES_PORT": "8001",
@@ -423,6 +425,98 @@ def image_content(image: str) -> Optional[str]:
     return image_id(image)
 
 
+# ── Was the bundled image built from these files? ─────────────────────────────
+
+_AGENT_DIR = _ROOT / "agent"
+# What the bundled agent's behaviour is made of, relative to agent/ — and to
+# /app inside the image, where agent/Dockerfile copies the directory.
+_AGENT_SOURCES = ("*.py", "variants/*.txt", "requirements.txt", "constraints.txt")
+# Prints {path: sha256 or null} for the image's own copies of argv's paths.
+AGENT_DIGEST_SCRIPT = (
+    "import hashlib, json, sys\n"
+    "out = {}\n"
+    "for p in sys.argv[1:]:\n"
+    "    try:\n"
+    "        out[p] = hashlib.sha256(open('/app/' + p, 'rb').read()).hexdigest()\n"
+    "    except OSError:\n"
+    "        out[p] = None\n"
+    "print(json.dumps(out))\n"
+)
+_source_checks: Dict[Tuple[str, str], Optional[str]] = {}
+
+
+def agent_sources(agent_dir: Path = _AGENT_DIR) -> Dict[str, str]:
+    """sha256 of each file the bundled image runs, by POSIX path relative to agent/."""
+    found: Dict[str, str] = {}
+    for pattern in _AGENT_SOURCES:
+        for path in sorted(agent_dir.glob(pattern)):
+            if path.is_file():
+                # Raw bytes on both sides: the image is built from these very
+                # bytes, CRLF checkout or not.
+                found[path.relative_to(agent_dir).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return found
+
+
+def source_drift(host: Mapping[str, str], image: Mapping[str, Optional[str]]) -> List[str]:
+    """What differs between the host's agent/ files and the image's copies, one line per file."""
+    drift = []
+    for path, digest in sorted(host.items()):
+        theirs = image.get(path)
+        if theirs is None:
+            drift.append(f"agent/{path} is not in the image (added since it was built)")
+        elif theirs != digest:
+            drift.append(f"agent/{path} differs from the image's copy")
+    return drift
+
+
+def stale_image_problem(image: str) -> Optional[str]:
+    """
+    Why the bundled image cannot stand for agent/ as it is on disk, or None.
+
+    Prompts and agent code are baked in at build time. Edit a variant without
+    rebuilding and the container runs the OLD prompt while every record names
+    the new one; the image's age says little (a checkout touches mtimes, and a
+    rebuild of unchanged code is harmless), so the bytes are compared instead.
+    Cached per (image, sources) for the life of the process.
+    """
+    if os.getenv("CREUSET_ALLOW_STALE_AGENT") == "1":
+        return None
+    ident = image_id(image)
+    if ident is None:
+        return None  # preflight reports the missing image itself
+    host = agent_sources()
+    key = (ident, hashlib.sha256(json.dumps(host, sort_keys=True).encode("utf-8")).hexdigest())
+    if key not in _source_checks:
+        _source_checks[key] = _check_sources(image, ident, host)
+    return _source_checks[key]
+
+
+def _check_sources(image: str, ident: str, host: Dict[str, str]) -> Optional[str]:
+    name = f"creuset-check-{uuid.uuid4().hex[:8]}"
+    cmd = ["run", "--rm", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
+           "--security-opt", "no-new-privileges", "--no-healthcheck",
+           "--entrypoint", "python", ident, "-c", AGENT_DIGEST_SCRIPT, *host]
+    try:
+        proc = _docker(cmd, timeout=60)
+        theirs = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        _docker(["rm", "-f", name], timeout=30)
+        theirs = None
+    except (OSError, ValueError, IndexError):
+        theirs = None
+    if not isinstance(theirs, dict):
+        return (f"Could not read the agent's files from image '{image}' to check it was built from "
+                f"agent/ as it is now. Rebuild it: docker compose build agent-blue")
+    drift = source_drift(host, theirs)
+    if not drift:
+        return None
+    more = f" (and {len(drift) - 3} more)" if len(drift) > 3 else ""
+    return (f"Image '{image}' was not built from agent/ as it is now: {'; '.join(drift[:3])}{more}. "
+            f"It would run the old code while every record names the new. "
+            f"Rebuild it: docker compose build agent-blue "
+            f"(or set CREUSET_ALLOW_STALE_AGENT=1 to run an older build on purpose).")
+
+
 def _failure(case_id: str, subject: Subject, run_id: str, status: str, error: str, elapsed: float,
              image_ref: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
     return {
@@ -474,10 +568,19 @@ def preflight(subject: Optional[Subject] = None) -> List[str]:
         if st.returncode != 0 or not state.startswith("running") or "unhealthy" in state or "starting" in state:
             problems.append(f"Container '{name}' not healthy ({state or 'missing'}) — run: docker compose up -d")
 
+    bundled = subject is None or subject.bundled
+    if bundled and not os.getenv("AGENT_MODEL"):
+        # The bundled agent would ask for gpt-4o-mini, which a non-OpenAI
+        # upstream refuses on every case: a whole batch failing closed.
+        problems.append("AGENT_MODEL is not set — put it in .env (e.g. AGENT_MODEL=openai/gpt-oss-20b)")
     image = subject.image if subject else AGENT_IMAGE
     if image_id(image) is None:
-        hint = "docker compose build agent-blue" if (subject is None or subject.bundled) else f"docker pull {image}"
+        hint = "docker compose build agent-blue" if bundled else f"docker pull {image}"
         problems.append(f"Agent image '{image}' missing — run: {hint}")
+    elif bundled:
+        stale = stale_image_problem(image)
+        if stale:
+            problems.append(stale)
     return problems
 
 

@@ -108,7 +108,10 @@ The rule checks, in order:
 
 The process exit code mirrors the decision: 0 for `DEPLOYED` or
 `DRY_RUN_WOULD_DEPLOY`, 1 for `BLOCKED`, 2 for a gate rejected before running
-(its record says why), and 3 for `SWITCH_FAILED`.
+(its record says why), and 3 for `SWITCH_FAILED`. A rejection is not a verdict on
+the agent: bad arguments, a misconfigured judge, or a sandbox that is not ready
+(Docker down, `AGENT_MODEL` unset for the bundled agent, or a bundled image not
+built from `agent/` as it is now) all exit 2 before any case runs.
 
 ## Switch event
 

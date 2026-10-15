@@ -159,6 +159,18 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **A bundled image built from other files ran under the new name**: prompts
+  and agent code are baked in at build time, so editing a variant without
+  rebuilding ran the old prompt while every record named the new one. Preflight
+  now compares the bytes of `agent/` with the image's copies and refuses a
+  mismatch, naming the files (`CREUSET_ALLOW_STALE_AGENT=1` runs an older build
+  on purpose). The doctor uses the same comparison instead of file ages.
+- **An unready sandbox read as a failed agent**: the gate reported Docker down
+  or a stale image as `BLOCKED`, exit 1, the code CI reads as "the agent failed
+  the attacks". It now runs preflight before the suite and exits 2.
+- **`AGENT_MODEL` unset silently asked for gpt-4o-mini**, which a non-OpenAI
+  upstream refuses on every case. It is now a preflight problem for the bundled
+  agent; external images get it empty.
 - **Image identity on Docker's containerd image store**: every build gets a new
   image ID there (the build attestation carries a timestamp), so rebuilding
   unchanged code looked like a different build. The doctor then reported

@@ -23,7 +23,8 @@ This is both the security audit trail and the evaluation dataset.
 Exit codes (stable; CI depends on them):
   0  PASS: deployed, or would deploy (--dry-run)
   1  FAIL: blocked by the gate, or the suite/scorer failed (fail-closed)
-  2  rejected before anything ran (bad version/variant/image, bad flags)
+  2  rejected before anything ran (bad version/variant/image, bad flags,
+     a sandbox that is not ready: Docker down, a stale bundled image)
   3  PASS, but the deploy did not complete: the gated build is NOT live
 
 Usage:
@@ -78,7 +79,9 @@ sys.path.insert(0, str(_ROOT / "judge"))
 from model_judge import JudgeConfigError, check_config  # noqa: E402
 from report_formats import junit_error, junit_xml, markdown_summary  # noqa: E402
 from waivers import load_waivers  # noqa: E402
-from run_test import AGENT_IMAGE, image_content, image_id, parse_agent_env, subject_problem  # noqa: E402
+from run_test import (  # noqa: E402
+    AGENT_IMAGE, image_content, image_id, make_subject, parse_agent_env, preflight, subject_problem,
+)
 from switch import StateError, inactive_slot, load_state, validate_build  # noqa: E402
 
 
@@ -419,9 +422,10 @@ def main(
                    "gate can give a verdict on another image but cannot deploy it")
     if not problem and library is not None and not library.is_file():
         problem = f"library {library} does not exist"
+    settings: tuple = ()
     if not problem:
         try:
-            parse_agent_env(agent_env or (), agent_env_file)
+            settings = parse_agent_env(agent_env or (), agent_env_file)
         except (OSError, ValueError) as e:
             problem = f"agent settings: {e}"
     if not problem and waivers is not None:
@@ -430,11 +434,16 @@ def main(
         except ValueError as e:   # checked before the suite spends quota, never "no waivers"
             problem = f"waivers: {e}"
     problem = problem or _judge_problem(skip_model_judge)
+    if not problem:
+        # The loader would refuse these too, but its refusal reaches the gate as
+        # a failed suite, exit 1: the same code as an agent that failed the
+        # attacks. Docker down or a stale image is not a verdict on the agent.
+        problem = "; ".join(preflight(make_subject(_variant, agent_image, settings))) or None
     if problem:
         record = _write_gate_record(version, _variant, None, "FAIL", "BLOCKED",
                                     error=f"Rejected before running: {problem}")
         _publish(None, "FAIL", "BLOCKED", f"Rejected before running: {problem}", junit, summary_md)
-        console.print(f"[bold red]⛔ GATE BLOCKED[/bold red] — {problem}. Audit: {record}")
+        console.print(f"[bold red]⛔ GATE BLOCKED[/bold red] — {problem.rstrip('.')}. Audit: {record}")
         raise typer.Exit(code=EXIT_REJECTED)
 
     console.print(

@@ -101,6 +101,34 @@ def test_a_stale_image_is_a_warning_with_the_rebuild_command(fake_docker, tmp_pa
     assert checks["mock-services"].status == "ok"
 
 
+def _agent_tree(tmp_path, prompt="be careful"):
+    for sub in ("agent/variants", "sandbox/mock_services", "deploy"):
+        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "agent" / "run_agent.py").write_text("x", encoding="utf-8")
+    (tmp_path / "agent" / "variants" / "hardened.txt").write_text(prompt, encoding="utf-8")
+
+
+def test_an_image_with_the_same_agent_bytes_is_fresh_whatever_its_age(fake_docker, tmp_path):
+    _agent_tree(tmp_path)
+    # Built an hour ago, before every file's mtime (as after a fresh checkout).
+    built = time.strftime("%Y-%m-%dT%H:%M:%S.123456789Z", time.gmtime(time.time() - 3600))
+    fake_docker["image inspect"] = _proc(built + "\n")
+    import run_test
+    fake_docker["run --rm"] = _proc(json.dumps(run_test.agent_sources(tmp_path / "agent")) + "\n")
+    checks = {c.name: c for c in doctor.check_images({}, tmp_path)}
+    assert checks["bundled agent"].status == "ok"
+
+
+def test_an_image_built_from_other_agent_bytes_fails_whatever_its_age(fake_docker, tmp_path):
+    _agent_tree(tmp_path, prompt="the new prompt")
+    built = time.strftime("%Y-%m-%dT%H:%M:%S.123456789Z", time.gmtime(time.time() + 3600))
+    fake_docker["image inspect"] = _proc(built + "\n")
+    fake_docker["run --rm"] = _proc(json.dumps({"run_agent.py": None, "variants/hardened.txt": "0" * 64}))
+    check = {c.name: c for c in doctor.check_images({}, tmp_path)}["bundled agent"]
+    assert check.status == "fail" and check.fix == "docker compose build agent-blue"
+    assert "agent/variants/hardened.txt differs" in check.detail
+
+
 def test_a_missing_mock_services_image_fails_but_router_only_warns(fake_docker, tmp_path):
     checks = {c.name: c for c in doctor.check_images({}, tmp_path)}
     assert checks["mock-services"].status == "fail"

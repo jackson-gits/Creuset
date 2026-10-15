@@ -295,6 +295,18 @@ def check_images(env: Dict[str, str], root: Path = ROOT) -> List[Check]:
             out.append(Check("images", label, FAIL if needed else WARN, f"{image} not built",
                              rebuild + ("" if needed else "   (only needed for blue/green)")))
             continue
+        drift = _agent_drift(image, root) if label == "bundled agent" else None
+        if drift is not None:
+            # The bytes themselves, so neither a checkout's fresh mtimes nor an
+            # edit with an old one can mislead it. Gate runs refuse a stale one.
+            if drift:
+                more = f" (+{len(drift) - 2} more)" if len(drift) > 2 else ""
+                out.append(Check("images", label, FAIL if needed else WARN,
+                                 f"{image} was not built from agent/ as it is now: "
+                                 f"{'; '.join(drift[:2])}{more}", rebuild))
+            else:
+                out.append(Check("images", label, OK, f"{image} (matches agent/)"))
+            continue
         newest, which = _newest_source(inputs)
         if newest > created + 1:
             rel = which.relative_to(root) if which else "?"
@@ -311,6 +323,31 @@ def check_images(env: Dict[str, str], root: Path = ROOT) -> List[Check]:
         else:
             out.append(Check("images", "agent under test", OK, f"{external} ({proc.stdout.strip()[:19]})"))
     return out
+
+
+def _agent_drift(image: str, root: Path = ROOT) -> Optional[List[str]]:
+    """
+    How the bundled image's agent files differ from root/agent ([] = identical),
+    or None if the image could not be read (then the age check stands in).
+    """
+    sys.path.insert(0, str(ROOT / "sandbox"))
+    try:
+        from run_test import AGENT_DIGEST_SCRIPT, agent_sources, source_drift
+    except Exception:  # pylint: disable=broad-except - fall back, never crash the doctor
+        return None
+    host = agent_sources(root / "agent")
+    if not host:
+        return None
+    proc = _docker(["run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                    "--security-opt", "no-new-privileges", "--no-healthcheck",
+                    "--entrypoint", "python", image, "-c", AGENT_DIGEST_SCRIPT, *host], timeout=60)
+    if proc is None or proc.returncode != 0:
+        return None
+    try:
+        theirs = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return source_drift(host, theirs) if isinstance(theirs, dict) else None
 
 
 def check_container_images(env: Dict[str, str]) -> List[Check]:

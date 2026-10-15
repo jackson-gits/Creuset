@@ -108,7 +108,7 @@ CONTRACT_ENV: Dict[str, str] = {
     "ANTHROPIC_BASE_URL": "The gateway's root, for Anthropic's SDK (which appends /v1/messages). "
                           "Works when llm-proxy points at api.anthropic.com.",
     "ANTHROPIC_API_KEY": "A placeholder, as for OPENAI_API_KEY.",
-    "AGENT_MODEL": "The model to request from the gateway.",
+    "AGENT_MODEL": "The model to request from the gateway (empty if the operator set none).",
 }
 
 

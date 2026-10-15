@@ -97,6 +97,8 @@ def gate_env(tmp_path, monkeypatch):
     # nor whether the developer's .env configures a judge.
     monkeypatch.delenv("CREUSET_AGENT_IMAGE", raising=False)
     monkeypatch.setattr(run_gate, "check_config", lambda: None)
+    calls["preflight"] = []
+    monkeypatch.setattr(run_gate, "preflight", lambda subject=None: calls["preflight"].append(subject) or [])
     return tmp_path / "gate_runs", calls
 
 
@@ -194,6 +196,25 @@ def test_a_misconfigured_judge_is_rejected_before_spending_agent_quota(gate_env,
     _scorer(monkeypatch)
     result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--skip-model-judge"])
     assert result.exit_code == 0
+
+
+def test_an_unready_sandbox_is_a_rejection_not_a_verdict(gate_env, monkeypatch):
+    logs, calls = gate_env
+    stale = "Image 'creuset-agent:latest' was not built from agent/ as it is now"
+    monkeypatch.setattr(run_gate, "preflight", lambda subject=None: [stale, "AGENT_MODEL is not set"])
+    result = runner.invoke(run_gate.app, ["--version", "v1", "--variant", "hardened", "--skip-model-judge"])
+    # 2, not 1: CI must not read a broken setup as an agent that failed the attacks.
+    assert result.exit_code == 2 and calls["suite"] == []
+    assert stale in _records(logs)[0]["error"] and "AGENT_MODEL" in _records(logs)[0]["error"]
+
+
+def test_preflight_checks_the_subject_the_suite_will_run(gate_env, monkeypatch):
+    _, calls = gate_env
+    _scorer(monkeypatch)
+    runner.invoke(run_gate.app, ["--version", "1.0", "--variant", "v1", "--agent-image", "acme/agent:1.0",
+                                 "--agent-env", "MODE=strict", "--skip-model-judge", "--dry-run"])
+    (subject,) = calls["preflight"]
+    assert subject.image == "acme/agent:1.0" and not subject.bundled and subject.env == (("MODE", "strict"),)
 
 
 def test_missing_library_is_rejected_before_running(gate_env, tmp_path):

@@ -176,6 +176,113 @@ def test_a_missing_image_is_a_harness_error_not_a_crash(docker):
     assert [a[0] for a in fake.calls] == ["image"]
 
 
+def test_container_env_has_no_made_up_model(docker, monkeypatch):
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    fake = docker(agent_stdout=COMPLETED)
+    run_test.run_case(_case(), "broken", EXTERNAL)
+    args = fake.run_args()
+    assert "AGENT_MODEL=" in args and not any(a.startswith("AGENT_MODEL=gpt") for a in args)
+
+
+# ── Is the bundled image built from agent/ as it is? ──────────────────────────
+
+class ImageFiles:
+    """Plays `docker image inspect` and the digest helper of an image holding `files`."""
+
+    def __init__(self, files, readable=True):
+        self.files, self.readable, self.runs = files, readable, []
+
+    def __call__(self, args, timeout=60, input=None):
+        if args[:2] == ["image", "inspect"]:
+            return _proc(IMAGE_ID + "\n")
+        if args[0] == "run":
+            self.runs.append(args)
+            assert "--network" in args and args[args.index("--network") + 1] == "none"
+            assert args[args.index("--entrypoint") + 1] == "python"
+            if not self.readable:
+                return _proc(returncode=125, stderr="no such image")
+            paths = args[args.index("-c") + 2:]
+            return _proc(json.dumps({p: self.files.get(p) for p in paths}) + "\n")
+        raise AssertionError(args)
+
+
+@pytest.fixture
+def image_files(monkeypatch):
+    monkeypatch.setattr(run_test, "_source_checks", {})
+    monkeypatch.delenv("CREUSET_ALLOW_STALE_AGENT", raising=False)
+
+    def install(files, readable=True):
+        fake = ImageFiles(files, readable)
+        monkeypatch.setattr(run_test, "_docker", fake)
+        return fake
+    return install
+
+
+def test_the_agent_sources_are_the_files_the_image_copies():
+    sources = run_test.agent_sources()
+    assert {"run_agent.py", "tools.py", "variants/hardened.txt", "constraints.txt"} <= set(sources)
+    assert not any("__pycache__" in p or p.endswith(".pyc") for p in sources)
+
+
+def test_an_image_built_from_these_files_passes(image_files):
+    fake = image_files(run_test.agent_sources())
+    assert run_test.stale_image_problem("creuset-agent:latest") is None
+    # Asked once per process, not once per case.
+    assert run_test.stale_image_problem("creuset-agent:latest") is None
+    assert len(fake.runs) == 1
+
+
+def test_an_edited_prompt_without_a_rebuild_is_refused(image_files):
+    files = dict(run_test.agent_sources())
+    files["variants/hardened.txt"] = "0" * 64
+    del files["variants/broken.txt"]
+    image_files(files)
+    problem = run_test.stale_image_problem("creuset-agent:latest")
+    assert "agent/variants/hardened.txt differs" in problem
+    assert "agent/variants/broken.txt is not in the image" in problem
+    assert "docker compose build agent-blue" in problem
+
+
+def test_an_unreadable_image_is_refused_not_trusted(image_files):
+    image_files({}, readable=False)
+    assert "Could not read" in run_test.stale_image_problem("creuset-agent:latest")
+
+
+def test_an_older_build_can_be_run_on_purpose(image_files, monkeypatch):
+    fake = image_files({})
+    monkeypatch.setenv("CREUSET_ALLOW_STALE_AGENT", "1")
+    assert run_test.stale_image_problem("creuset-agent:measured-2026-09-20") is None
+    assert fake.runs == []
+
+
+class Stack:
+    """A healthy stack, as preflight() sees it, with an image built from these files."""
+
+    def __call__(self, args, timeout=60, input=None):
+        if args[0] == "info":
+            return _proc("27.0.0\n")
+        if args[:2] == ["network", "inspect"]:
+            return _proc("true\n")
+        if args[0] == "inspect":
+            return _proc("running healthy\n")
+        if args[:2] == ["image", "inspect"]:
+            return _proc(IMAGE_ID + "\n")
+        if args[0] == "run":
+            paths = args[args.index("-c") + 2:]
+            return _proc(json.dumps(run_test.agent_sources()) if paths else "{}")
+        raise AssertionError(args)
+
+
+def test_preflight_wants_a_model_for_the_bundled_agent_only(monkeypatch):
+    monkeypatch.setattr(run_test, "_docker", Stack())
+    monkeypatch.setattr(run_test, "_source_checks", {})
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    assert any("AGENT_MODEL" in p for p in run_test.preflight())
+    assert not any("AGENT_MODEL" in p for p in run_test.preflight(EXTERNAL))
+    monkeypatch.setenv("AGENT_MODEL", "openai/gpt-oss-20b")
+    assert run_test.preflight() == []
+
+
 # ── What comes out ────────────────────────────────────────────────────────────
 
 def test_harness_audit_replaces_agent_reported_audit(docker):
