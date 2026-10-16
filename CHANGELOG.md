@@ -188,6 +188,18 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **A restarted monitor could roll traffic back onto the bad build**: the
+  monitor's list of files already checked lives in memory, so after a restart it
+  re-read `logs/live_traffic/`, met the same offending transcript, and rolled
+  back again, toggling traffic to the slot it had just left. It now passes
+  `--expect-active <slot>` with the slot that served the transcript (`serve.py`
+  records it), so a replay is a no-op. Simulated traffic carries the live slot
+  too, and the incident report records which slot the rollback expected.
+- **`run_eval.py`'s rollback measurement moved live traffic**: it switched and
+  rolled back `deploy/state/` itself, so the running router followed (the live
+  slot was still labelled `rollback-from-latency-check` from the 2026-09-20 run).
+  It now measures in a throwaway `CREUSET_STATE_DIR`. Its benign batch is the
+  one the loader names (`--manifest-out`), not the newest manifest by file time.
 - **Images built on Windows could differ from CI's**: with `core.autocrlf` a
   checkout wrote CRLF into the agent's prompts and code, so an image built there
   sent the model different bytes from one built in CI. Everything copied into a

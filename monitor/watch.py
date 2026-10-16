@@ -66,6 +66,7 @@ _WINDOW_SECONDS = int(os.getenv("MONITOR_WINDOW_SECONDS", "60"))
 _WATCH_INTERVAL = int(os.getenv("WATCH_INTERVAL_SECONDS", "5"))
 
 SENSITIVE_TOOLS = {"delete_file", "charge_payment", "send_email"}
+SLOTS = ("blue", "green")   # deploy/switch.py's slots
 
 
 # ── Attack pattern loader ─────────────────────────────────────────────────────
@@ -116,8 +117,26 @@ class ToolFrequencyTracker:
 
 # ── Incident response ─────────────────────────────────────────────────────────
 
-def _trigger_rollback(reason: str, evidence: Dict[str, Any]) -> None:
-    """Roll back to the previous slot and write an incident report."""
+def rollback_command(slot: Optional[str]) -> List[str]:
+    """
+    The switch.py call that rolls back the slot which served the offending
+    transcript.
+
+    Named, the rollback happens only while that slot is still live. seen_files
+    lives in memory, so a restarted monitor re-reads every file still in
+    live_traffic/: an unconditional rollback would then find the same bad
+    transcript and move traffic BACK to the build it had just left. A
+    transcript that names no slot (written by something other than serve.py)
+    keeps the unconditional rollback, since nothing says which slot to expect.
+    """
+    cmd = [sys.executable, str(_SWITCH_SCRIPT), "rollback"]
+    if slot in SLOTS:
+        cmd += ["--expect-active", slot]
+    return cmd
+
+
+def _trigger_rollback(reason: str, evidence: Dict[str, Any], slot: Optional[str] = None) -> None:
+    """Roll back the slot that served the offending traffic and write an incident report."""
     # Wall-clock instants, not a duration: what is worth measuring is how long a
     # bad deployment stayed live, which starts when the offending traffic was
     # written and ends when the slot actually moved. Only the second half is
@@ -128,7 +147,7 @@ def _trigger_rollback(reason: str, evidence: Dict[str, Any]) -> None:
     console.print("[bold yellow]Initiating rollback...[/bold yellow]")
 
     result = subprocess.run(
-        [sys.executable, str(_SWITCH_SCRIPT), "rollback"],
+        rollback_command(slot),
         cwd=str(_ROOT),
         capture_output=False,
         text=True,
@@ -142,6 +161,9 @@ def _trigger_rollback(reason: str, evidence: Dict[str, Any]) -> None:
         "type": "monitor_anomaly",
         "reason": reason,
         "evidence": evidence,
+        # The slot the rollback was conditional on (None: unconditional).
+        # switch.py exits 0 without moving traffic when it is no longer live.
+        "expected_active": slot if slot in SLOTS else None,
         "detected_at": detected_at,
         "rollback_completed_at": time.time(),
         "rollback_seconds": round(time.time() - detected_at, 3),
@@ -195,6 +217,7 @@ def watch(max_cycles: Optional[int] = None) -> None:
                 _trigger_rollback(
                     f"Sensitive tool-call frequency spike: {anomaly}",
                     {"file": fpath.name, "tool_calls": tool_calls},
+                    transcript.get("slot"),
                 )
                 return  # stop watching after rollback
 
@@ -213,6 +236,7 @@ def watch(max_cycles: Optional[int] = None) -> None:
                     _trigger_rollback(
                         f"Forbidden output pattern match: {pattern_check['reason']}",
                         {"file": fpath.name, "output": transcript.get("output", "")[:500]},
+                        transcript.get("slot"),
                     )
                     return
 

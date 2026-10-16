@@ -50,6 +50,22 @@ _LIVE_TRAFFIC = _ROOT / "logs" / "live_traffic"
 _WATCH_SCRIPT = _ROOT / "monitor" / "watch.py"
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 
+sys.path.insert(0, str(_ROOT / "deploy"))
+from switch import StateError, load_state  # noqa: E402
+
+
+def _active_slot() -> Optional[str]:
+    """
+    The slot serving traffic now (CREUSET_STATE_DIR is honoured), which is the
+    one the simulated transcripts claim to come from. serve.py stamps `slot` on
+    every live transcript, and the monitor rolls back only while that slot is
+    still live, so the demo exercises the same path as real traffic.
+    """
+    try:
+        return load_state().get("active")
+    except StateError:
+        return None
+
 
 # ── Traffic generators ────────────────────────────────────────────────────────
 
@@ -168,10 +184,12 @@ def main(
 
     time.sleep(1.0)  # let monitor start
 
+    slot = _active_slot()
+
     # Write benign traffic
     console.print(f"\n[bold]Writing {benign_count} benign traffic entries...[/bold]")
     for i in range(1, benign_count + 1):
-        t = _benign_transcript(i)
+        t = {**_benign_transcript(i), "slot": slot}
         path = _write_transcript(t)
         console.print(f"  [green]✓[/green] {path.name}")
         time.sleep(interval)
@@ -180,7 +198,7 @@ def main(
     if inject_attack:
         time.sleep(1.0)
         console.print("\n[bold red]⚠ Injecting malicious traffic entry...[/bold red]")
-        t = _malicious_transcript()
+        t = {**_malicious_transcript(), "slot": slot}
         # Taken as late as possible: everything before this point is the demo
         # arranging itself, and counting it inflates the headline latency with
         # this script's own sleeps.
