@@ -22,8 +22,16 @@ service would (GET /orders/<id>, POST /refunds), and knows nothing about
 Creuset. Pointed at the REST mock with
     --agent-env 'ORDERS_API_URL=${CREUSET_MOCK_URL}/http/orders-api'
 it is tested with no code change; see cases_http.yaml.
+
+With MCP_URL set it is an MCP client instead: it initialises a session, lists
+the server's tools and calls them with tools/call (JSON-RPC over HTTP), the
+way an agent whose tools come from MCP servers does. Pointed at the MCP mock
+with
+    --agent-env 'MCP_URL=${CREUSET_MOCK_URL}/mcp'
+it is tested with no code change; see cases_mcp.yaml.
 """
 
+import itertools
 import json
 import os
 import re
@@ -60,6 +68,39 @@ def call_api(name: str, args: dict) -> object:
         return json.loads(response.read())
 
 
+_mcp_ids = itertools.count(1)
+
+
+def mcp_post(message: dict) -> object:
+    """One JSON-RPC message to the MCP server; the reply, or None for a notification's empty 202."""
+    request = urllib.request.Request(
+        os.environ["MCP_URL"], data=json.dumps(message).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = response.read()
+    return json.loads(body) if body else None
+
+
+def mcp_request(method: str, params: dict) -> dict:
+    reply = mcp_post({"jsonrpc": "2.0", "id": next(_mcp_ids), "method": method, "params": params})
+    if "error" in reply:
+        raise RuntimeError(f"MCP {method}: {reply['error'].get('message')}")
+    return reply["result"]
+
+
+def mcp_connect() -> list:
+    """The MCP handshake, then the server's tool names."""
+    mcp_request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": "creuset-example-scripted", "version": "1"}})
+    mcp_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return [tool["name"] for tool in mcp_request("tools/list", {})["tools"]]
+
+
+def call_mcp(name: str, args: dict) -> object:
+    result = mcp_request("tools/call", {"name": name, "arguments": args})
+    return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+
 def strings(value: object):
     """Every string inside a JSON value: where an injected instruction can hide."""
     if isinstance(value, str):
@@ -74,8 +115,15 @@ def strings(value: object):
 
 def run(scenario: dict, variant: str) -> dict:
     calls = []
+    if os.environ.get("MCP_URL"):
+        log(f"MCP server offers: {mcp_connect()}")
 
     def tool(name: str, args: dict) -> object:
+        if os.environ.get("MCP_URL"):
+            result = call_mcp(name, args)
+            calls.append({"tool": name, "input": args, "output": json.dumps(result)})
+            log(f"mcp {name}({args}) -> {result}")
+            return result
         if os.environ.get("ORDERS_API_URL"):
             result = call_api(name, args)
             method, template = REST_ROUTES[name]

@@ -47,6 +47,18 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **MCP mock**: `$CREUSET_MOCK_URL/mcp` is an MCP server (streamable HTTP,
+  JSON-RPC answered as plain JSON, stateless; protocol revisions 2024-11-05 to
+  2025-06-18), so an agent whose tools come from MCP servers is tested by
+  re-pointing its server URL, with no code change. `tools/list` returns the
+  library's new top-level `mcp_tools` (name, description, input schema);
+  every `tools/call` is recorded like a generic tool call (`"via": "mcp"`) and
+  answered from the case's `tool_responses`, so forbidden tools, argument
+  policies and the judge work unchanged. A call to an unlisted tool, or with
+  oversized arguments, is refused and still recorded; a request too malformed
+  or large to name a tool is recorded unattributed, which fails its case
+  closed. The scripted example gained an MCP client mode
+  (`cases_mcp.yaml`, `mcp.env`), and CI gates it over MCP.
 - **`creuset` command**: `pip install -e .` in a checkout installs one entry
   point (`creuset.py`) that runs every script from any directory: `creuset
   doctor`, `run`, `batch`, `score`, `gate`, `switch`, `monitor`, `simulate`,

@@ -78,7 +78,7 @@ from batch_files import (  # noqa: E402
 )
 from run_test import (  # noqa: E402
     TIMEOUT, Subject, _container_env, env_fingerprint, image_content, image_id, limits_from_env, make_subject,
-    parse_agent_env, preflight, remove_containers, run_case,
+    parse_agent_env, preflight, remove_containers, run_case, with_library_context,
 )
 
 app = typer.Typer(add_completion=False)
@@ -152,6 +152,17 @@ def validate_library(raw: Any) -> List[str]:
         problems = _schema_errors(Draft202012Validator({"$defs": schema["$defs"], **header_schema}), header)
         if problems:
             return [f"library: {p}" for p in problems]
+        # The MCP mock lists these; a tool it offers that no case may name could
+        # be called without any check knowing it exists.
+        inventory = set(library_tools(raw))
+        for name, spec in (raw.get("mcp_tools") or {}).items():
+            if name not in inventory:
+                problems.append(f"library: mcp_tools names {name!r}, not in the library's tools {sorted(inventory)}")
+            size = len(json.dumps(spec, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            if size > _MAX_RESPONSE_BYTES:
+                problems.append(f"library: mcp_tools[{name!r}] is {size} bytes; the limit is {_MAX_RESPONSE_BYTES}")
+        if problems:
+            return problems
     elif not isinstance(raw, list):
         return ["a library is a list of cases, or an object with a `cases` list"]
     return validate(library_cases(raw), library_tools(raw))
@@ -901,7 +912,8 @@ def resume_suite(
             f"Restore that image, start a new batch, or pass --allow-image-change if you "
             f"genuinely intend a mixed batch.")
 
-    all_cases = load_library(library)
+    raw = load_library_doc(library)
+    all_cases = with_library_context(library_cases(raw), raw)
     in_scope = select_cases(all_cases, manifest.get("categories"), manifest.get("selected_ids"),
                             manifest.get("tags"))
     repeat = int(manifest.get("repeat") or 1)
@@ -1133,7 +1145,7 @@ def main(
     if unused:
         console.print(f"[red]✗ --tag {unused}: no case in {library.name} carries it.[/red]")
         raise typer.Exit(code=2)
-    selected = select_cases(all_cases, category, ids, tag)
+    selected = with_library_context(select_cases(all_cases, category, ids, tag), raw)
     if not selected:
         console.print("[red]✗ No cases selected: nothing to run.[/red]")
         raise typer.Exit(code=1)

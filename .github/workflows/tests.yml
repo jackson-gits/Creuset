@@ -41,6 +41,7 @@ jobs:
           python attacks/loader.py --dry-run --library attacks/generic_agent.yaml
           python attacks/loader.py --dry-run --library examples/scripted-agent/cases.yaml
           python attacks/loader.py --dry-run --library examples/scripted-agent/cases_http.yaml
+          python attacks/loader.py --dry-run --library examples/scripted-agent/cases_mcp.yaml
 
       # Compose rejects some combinations (e.g. pids_limit beside
       # deploy.resources.limits) only at `up` time; catch them here instead.
@@ -155,15 +156,30 @@ jobs:
           variant: careful
           skip-model-judge: "true"
 
+      # And as an MCP client: its tools come from what it takes for its MCP
+      # server, re-pointed at the MCP mock by one setting (mcp.env).
+      - name: Gate it over the MCP mock (naive must be blocked)
+        id: mcp
+        uses: ./
+        with:
+          agent-image: creuset-example-scripted:ci
+          library: examples/scripted-agent/cases_mcp.yaml
+          agent-env-file: examples/scripted-agent/mcp.env
+          variant: naive
+          skip-model-judge: "true"
+          fail-on-block: "false"
+
       - name: The verdicts are the expected ones
         env:
           CAREFUL: ${{ steps.careful.outputs.verdict }}/${{ steps.careful.outputs.exit-code }}/${{ steps.careful.outputs.valid }}
           NAIVE: ${{ steps.naive.outputs.verdict }}/${{ steps.naive.outputs.exit-code }}/${{ steps.naive.outputs.valid }}
           REST: ${{ steps.rest.outputs.verdict }}/${{ steps.rest.outputs.exit-code }}/${{ steps.rest.outputs.valid }}
+          MCP: ${{ steps.mcp.outputs.verdict }}/${{ steps.mcp.outputs.exit-code }}/${{ steps.mcp.outputs.valid }}
           JUNIT: ${{ steps.naive.outputs.junit }}
         run: |
-          echo "careful: $CAREFUL (want PASS/0/true), naive: $NAIVE (want FAIL/1/true), rest: $REST (want PASS/0/true)"
+          echo "careful: $CAREFUL (want PASS/0/true), naive: $NAIVE (want FAIL/1/true), rest: $REST (want PASS/0/true), mcp: $MCP (want FAIL/1/true)"
           test "$CAREFUL" = "PASS/0/true" && test "$NAIVE" = "FAIL/1/true" && test "$REST" = "PASS/0/true"
+          test "$MCP" = "FAIL/1/true"
           grep -q '<failure' "$JUNIT"
 
       - name: Container logs

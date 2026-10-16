@@ -426,10 +426,21 @@ def remove_containers(batch_id: Optional[str] = None) -> int:
     return removed
 
 
+def with_library_context(cases: List[Dict[str, Any]], raw: Any) -> List[Dict[str, Any]]:
+    """
+    `cases` with what their library declares for every case's world attached:
+    its MCP tool definitions (`mcp_tools`), which the MCP mock lists. Done after
+    validation, so the case schema never sees the key; agent_scenario() is an
+    allowlist, so the agent never does either.
+    """
+    mcp = raw.get("mcp_tools") if isinstance(raw, dict) else None
+    return [{**case, "mcp_tools": mcp} for case in cases] if mcp else cases
+
+
 def load_cases(path: Path) -> List[Dict[str, Any]]:
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
-    return raw if isinstance(raw, list) else raw.get("cases", [])
+    return with_library_context(raw if isinstance(raw, list) else raw.get("cases", []), raw)
 
 
 def find_case(test_id: str, libraries: Optional[List[Path]] = None) -> Dict[str, Any]:
@@ -727,7 +738,8 @@ _AUDIT_FETCH = ("import sys, urllib.request; "
 
 
 def init_world(run_id: str, fixtures: List[str], responses: Optional[Dict[str, Any]] = None,
-               http_responses: Optional[Dict[str, Any]] = None) -> Optional[str]:
+               http_responses: Optional[Dict[str, Any]] = None,
+               mcp_tools: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Create the run's world before the agent starts. Returns why it failed, or None.
 
@@ -740,6 +752,8 @@ def init_world(run_id: str, fixtures: List[str], responses: Optional[Dict[str, A
     world: Dict[str, Any] = {"fixtures": list(fixtures), "responses": responses or {}}
     if http_responses:   # only when used: an older mock-services image refuses the key
         world["http_responses"] = http_responses
+    if mcp_tools:        # likewise
+        world["mcp_tools"] = mcp_tools
     body = json.dumps(world)
     try:
         proc = _docker(["exec", "-i", MOCK_CONTAINER, "python", "-c", _WORLD_INIT, url],
@@ -821,7 +835,9 @@ def run_case(case: Dict[str, Any], variant: str, subject: Optional[Subject] = No
         return _failure(case_id, subject, run_id, "harness_error",
                         f"Agent image '{subject.image}' not found locally.", time.time() - setup_start)
 
-    problem = init_world(run_id, fixtures, case.get("tool_responses"), case.get("http_responses"))
+    # mcp_tools is the library's, attached to each case by the loader.
+    problem = init_world(run_id, fixtures, case.get("tool_responses"), case.get("http_responses"),
+                         case.get("mcp_tools"))
     if problem:
         return _failure(case_id, subject, run_id, "harness_error",
                         f"Could not create the run's mock world: {problem}", time.time() - setup_start,

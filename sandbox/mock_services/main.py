@@ -52,6 +52,14 @@ REST mock
   path match, else 404. The api name is the "tool" the rule layer and the
   argument policies see.
 
+MCP mock
+  POST /mcp (or /r/{run_id}/mcp) is an MCP server: JSON-RPC over streamable
+  HTTP, answered as plain JSON, stateless. tools/list returns the run's
+  `mcp_tools` (the library's definitions); each tools/call is recorded like a
+  generic tool call, plus "via": "mcp", and answered from `responses`. An agent
+  whose tools come from MCP servers only has its server URL re-pointed:
+  $CREUSET_MOCK_URL/mcp.
+
 Ground truth
   GET /audit/log?run=<id> returns every service action the run performed.
   The judge treats this server-side log as authoritative evidence of what the
@@ -78,7 +86,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 app = FastAPI(title="Creuset Mock Services", version="2.0.0")
@@ -96,6 +104,11 @@ _MAX_HTTP_RULES = 64           # per api, per run
 _MAX_HTTP_APIS = 16
 _MAX_RESPONSES = 64            # canned tool responses per run
 _MAX_JSON_BYTES = 64 * 1024    # per canned response, and per generic tool call's args
+_MAX_MCP_TOOLS = 64            # tool definitions the MCP mock lists, per run
+_MAX_MCP_BODY = 1024 * 1024    # one MCP request; past this it is refused, but still recorded
+# MCP protocol revisions the mock speaks, newest first. It answers in plain
+# JSON (streamable HTTP lets a server do so), keeps no session, and lists tools.
+_MCP_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 _CLIPPED_ARGS_CHARS = 2000     # what an oversized call's args are recorded as
 
 
@@ -224,13 +237,16 @@ _FIXTURES: Dict[str, Dict[str, Any]] = {
 class _World:
     def __init__(self, fixtures: Optional[List[str]] = None,
                  responses: Optional[Dict[str, Any]] = None,
-                 http_responses: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+                 http_responses: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+                 mcp_tools: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         self.files: Dict[str, str] = dict(_BASE_FILES)
         self.db: List[Dict[str, Any]] = copy.deepcopy(_BASE_DB)
         self.audit: List[Dict[str, Any]] = []
         self.fixtures: List[str] = []
         self.responses: Dict[str, Any] = copy.deepcopy(responses or {})
         self.http_responses: Dict[str, List[Dict[str, Any]]] = copy.deepcopy(http_responses or {})
+        # MCP mock: tool name -> {description, input_schema}, what tools/list returns.
+        self.mcp_tools: Dict[str, Dict[str, Any]] = copy.deepcopy(mcp_tools or {})
         for name in fixtures or []:
             fx = _FIXTURES.get(name)
             if fx is None:
@@ -314,6 +330,8 @@ class RunInit(BaseModel):
     responses: Dict[str, Any] = {}  # generic tool name → the JSON it answers with
     # REST mock: api name → rules {method, path | path_matches, status, body}
     http_responses: Dict[str, List[Dict[str, Any]]] = {}
+    # MCP mock: tool name -> {description, input_schema} (the library's mcp_tools)
+    mcp_tools: Dict[str, Dict[str, Any]] = {}
 
 
 def _check_responses(responses: Dict[str, Any]) -> None:
@@ -341,6 +359,22 @@ def _check_http_responses(apis: Dict[str, List[Dict[str, Any]]]) -> None:
             problem = _http_rule_problem(rule)
             if problem:
                 raise HTTPException(status_code=400, detail=f"http_responses[{api!r}]: {problem}")
+
+
+def _check_mcp_tools(tools: Dict[str, Dict[str, Any]]) -> None:
+    """Every definition listable as written; otherwise 400 before any world exists."""
+    if len(tools) > _MAX_MCP_TOOLS:
+        raise HTTPException(status_code=400, detail=f"At most {_MAX_MCP_TOOLS} MCP tools per run.")
+    for name, spec in tools.items():
+        if not re.fullmatch(_TOOL_NAME, name):
+            raise HTTPException(status_code=400, detail=f"Invalid tool name in mcp_tools: {name!r}")
+        if (not isinstance(spec, dict) or set(spec) - {"description", "input_schema"}
+                or not isinstance(spec.get("input_schema"), dict)
+                or not isinstance(spec.get("description", ""), str)):
+            raise HTTPException(status_code=400, detail=f"mcp_tools[{name!r}]: an input_schema object and an "
+                                                        f"optional description, nothing else")
+        if _json_size(spec) > _MAX_JSON_BYTES:
+            raise HTTPException(status_code=400, detail=f"mcp_tools[{name!r}] exceeds {_MAX_JSON_BYTES} bytes.")
 
 
 def _http_rule_problem(rule: Any) -> Optional[str]:
@@ -376,6 +410,8 @@ def _init_conflict(world: _World, body: RunInit) -> Optional[str]:
         return "canned responses"
     if body.http_responses and body.http_responses != world.http_responses:
         return "canned HTTP responses"
+    if body.mcp_tools and body.mcp_tools != world.mcp_tools:
+        return "MCP tool definitions"
     return None
 
 
@@ -399,8 +435,9 @@ async def init_run(run_id: str, body: RunInit) -> Dict[str, Any]:
     """
     _check_responses(body.responses)
     _check_http_responses(body.http_responses)
+    _check_mcp_tools(body.mcp_tools)
     try:
-        candidate = _World(body.fixtures, body.responses, body.http_responses)
+        candidate = _World(body.fixtures, body.responses, body.http_responses, body.mcp_tools)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"Unknown fixture: {e.args[0]}")
     with _lock:
@@ -630,6 +667,95 @@ async def http_mock(
                                  "query": dict(request.query_params), "body": body})
     status, answer = _http_answer(world, api, method, full_path)
     return JSONResponse(status_code=status, content=answer)
+
+
+# ── MCP mock ─────────────────────────────────────────────────────────────────
+# An MCP server (streamable HTTP, answered as plain JSON) at /mcp, so an agent
+# whose tools come from MCP servers needs only its server URL re-pointed:
+# $CREUSET_MOCK_URL/mcp. tools/list returns the library's mcp_tools; every
+# tools/call is recorded exactly like POST /tools/{name} (with "via": "mcp")
+# and answered from the run's canned responses. Stateless: no session id.
+
+def _rpc_result(id_: Any, result: Any) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": id_, "result": result}
+
+
+def _rpc_error(id_: Any, code: int, message: str) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+
+
+def _mcp_tool_call(world: _World, id_: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    name, args = params.get("name"), params.get("arguments")
+    args = {} if args is None else args
+    if not isinstance(name, str) or not name:
+        _log(world, "mcp_request", {"method": "tools/call", "params": json.dumps(params)[:_CLIPPED_ARGS_CHARS]})
+        return _rpc_error(id_, -32602, "tools/call needs a tool name")
+    # Recorded before anything can refuse it: an attempt is evidence too, and
+    # one left unrecorded would pass as a call never made.
+    if _json_size(args) > _MAX_JSON_BYTES:
+        _log(world, "tool_call", {"tool": name, "args": {"_clipped": json.dumps(args)[:_CLIPPED_ARGS_CHARS]},
+                                  "via": "mcp"})
+        return _rpc_error(id_, -32602, f"Tool arguments exceed {_MAX_JSON_BYTES} bytes.")
+    _log(world, "tool_call", {"tool": name, "args": args, "via": "mcp"})
+    if name not in world.mcp_tools:
+        return _rpc_error(id_, -32602, f"Unknown tool: {name}")
+    if not isinstance(args, dict):
+        return _rpc_error(id_, -32602, "arguments must be an object")
+    answer = copy.deepcopy(world.responses.get(name, {"status": "ok"}))
+    result: Dict[str, Any] = {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": False}
+    if isinstance(answer, dict):
+        result["structuredContent"] = answer
+    return _rpc_result(id_, result)
+
+
+def _mcp_answer(world: _World, message: Any) -> Optional[Dict[str, Any]]:
+    """The JSON-RPC response to one MCP message; None for a notification, which gets none."""
+    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
+        return _rpc_error(message.get("id") if isinstance(message, dict) else None, -32600, "Invalid Request")
+    if "id" not in message:
+        return None   # notifications/initialized and the like
+    id_, method, params = message["id"], message["method"], message.get("params") or {}
+    if not isinstance(params, dict):
+        return _rpc_error(id_, -32602, "params must be an object")
+    if method == "initialize":
+        asked = params.get("protocolVersion")
+        return _rpc_result(id_, {"protocolVersion": asked if asked in _MCP_VERSIONS else _MCP_VERSIONS[0],
+                                 "capabilities": {"tools": {"listChanged": False}},
+                                 "serverInfo": {"name": "creuset-mock", "version": "1.0.0"}})
+    if method == "ping":
+        return _rpc_result(id_, {})
+    if method == "tools/list":
+        return _rpc_result(id_, {"tools": [
+            {"name": name, "description": spec.get("description", ""), "inputSchema": spec["input_schema"]}
+            for name, spec in world.mcp_tools.items()]})
+    if method == "tools/call":
+        return _mcp_tool_call(world, id_, params)
+    return _rpc_error(id_, -32601, f"Method not found: {method}")
+
+
+@agent.post("/mcp")
+async def mcp(request: Request, run: str = Depends(_run_id)) -> Response:
+    world = _world_for(run)
+    raw = await request.body()
+    if len(raw) > _MAX_MCP_BODY:
+        # No tool can be attributed to it, so the rule layer fails the case closed.
+        _log(world, "mcp_request", {"body": raw[:_CLIPPED_ARGS_CHARS].decode("utf-8", "replace")})
+        return JSONResponse(status_code=413, content=_rpc_error(None, -32600, "Request too large."))
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return JSONResponse(status_code=400, content=_rpc_error(None, -32700, "Parse error"))
+    if isinstance(payload, list):   # a JSON-RPC batch (protocol 2025-03-26)
+        answers = [a for a in (_mcp_answer(world, m) for m in payload) if a is not None]
+        return JSONResponse(content=answers) if answers else Response(status_code=202)
+    answer = _mcp_answer(world, payload)
+    return Response(status_code=202) if answer is None else JSONResponse(content=answer)
+
+
+@agent.get("/mcp")
+async def mcp_stream() -> Response:
+    # Streamable HTTP lets a server decline the optional server-to-client stream.
+    return Response(status_code=405, headers={"Allow": "POST"})
 
 
 # Mounted after every @agent route above: many FastAPI releases copy a router's

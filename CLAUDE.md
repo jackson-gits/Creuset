@@ -103,6 +103,12 @@ Other entry points:
     `$CREUSET_MOCK_URL/http/<api>/<path>` (`http_responses`) reached with no code change via
     `--agent-env 'API_URL=${CREUSET_MOCK_URL}/http/<api>'` (`${CREUSET_MOCK_URL}` and
     `${CREUSET_RUN_ID}` are filled in per run). Tool names: OpenAI/Anthropic alphabet + dots.
+  - MCP tools (2026-10-16): the **MCP mock** `$CREUSET_MOCK_URL/mcp` (JSON-RPC over
+    streamable HTTP, plain-JSON answers, stateless) lists the library's top-level
+    `mcp_tools` and records each `tools/call` as a `tool_call` (`"via": "mcp"`), answered
+    from `tool_responses`. The loader (and `run_test.load_cases`) attach `mcp_tools` to
+    every case after validation (`with_library_context`); the harness passes them to the
+    world. `mcp_request` is the one deliberately unattributable audit action.
   - Policies: `forbidden_calls` / `required_calls` (judge/call_policy.py): argument-level
     rules, checked against the server audit; unknown arguments resolve in the safe
     direction both ways. New rule check `call_policy`, absent from cases without rules.
@@ -427,17 +433,17 @@ since). Left, roughly in order:
 1. **Before pushing anything else that touches `action.yml`**, run the job simulator idea
    from session 11: one shared `RUNNER_TEMP`, step outputs, upload-artifact's path and
    name rules. The action's first real run found three bugs a single local run hid.
-2. **An MCP mock**: agents whose tools come from MCP servers still need an adapter. The
-   REST mock covers HTTP tools; MCP would need tool schemas in the library.
-3. **Results browser**: shows waived and repeated cases now, but not `subject`,
-   `contract_errors`, the sandbox limits or the gate's `slot` / `tested_image_content`.
-4. **Blue/green for external images.** `--agent-image` is verdict-only today. Deploying one
+2. **Blue/green for external images.** `--agent-image` is verdict-only today. Deploying one
    needs a slot contract (`/health` and `/invoke` on :8000), a per-slot image the gate
    chooses, and a way for the monitor to see live traffic without `serve.py`'s logs.
-5. **Packaging and release**: one `creuset` entry point (pyproject is tool config only), a
-   first tagged release (the action is then `uses: jackson-gits/Creuset@v1`), versioned
-   CHANGELOG sections.
-6. The measurement work under "Open work" above is independent, and still open.
+3. **The first tagged release**: `pyproject.toml` is at 1.0.0 and `creuset` is an entry
+   point (2026-10-16); tag `v1.0.0` and a moving `v1` on `main` once the 2026-10-16 branch
+   is merged, so the action reads `uses: jackson-gits/Creuset@v1`, and turn CHANGELOG's
+   `[Unreleased]` into `[1.0.0]`.
+4. The measurement work under "Open work" above is independent, and still open.
+
+Done on 2026-10-16: the MCP mock, the results browser's "What was tested" panel, and the
+`creuset` command.
 
 ## Useful commands
 
