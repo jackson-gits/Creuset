@@ -262,7 +262,10 @@ function renderReport(data) {
 
     ${data.gate ? `<div class="sub">Gate decision: <b>${esc(data.gate.decision || "—")}</b>
        · version <span class="mono">${esc(data.gate.version || "—")}</span>
+       ${data.gate.slot ? `· slot <b>${esc(data.gate.slot)}</b>` : ""}
        ${data.gate.error ? `<br><span style="color:var(--fail)">${esc(data.gate.error)}</span>` : ""}</div>` : ""}
+
+    ${provenance(data.provenance || {}, data.gate)}
 
     ${probes}
 
@@ -271,6 +274,43 @@ function renderReport(data) {
       <thead><tr><th>ID</th><th>Sev</th><th>Rule</th><th>Judge</th><th>Final</th><th>Why</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+}
+
+// What exactly was measured: the subject, the box, the agent's settings. A
+// number means little without these, and two reports that differ in any of
+// them are not one comparison.
+function provenance(p, gate) {
+  const short = (id) => (id ? String(id).replace("sha256:", "").slice(0, 12) : "—");
+  const kv = (obj) => obj
+    ? Object.entries(obj).map(([k, v]) => `${esc(k)}=${esc(Array.isArray(v) ? v.join(",") || "—" : v)}`).join(" · ")
+    : "not recorded";
+  const s = p.subject || {};
+  const rows = [
+    ["Subject", s.kind ? `${esc(s.kind)} · <span class="mono">${esc(s.image || "?")}</span>
+      · content <span class="mono">${esc(short(s.image_content))}</span>
+      · id <span class="mono">${esc(short(s.image_id))}</span>
+      ${(s.env || []).length ? `· agent settings ${esc(s.env.join(", "))}` : ""}` : "not recorded"],
+    ["Runs per case", esc(p.repeat ?? 1)],
+    ["Agent settings", kv(p.run_settings)],
+    ["Sandbox", kv(p.sandbox)],
+    ["Thresholds", p.thresholds ? Object.entries(p.thresholds).map(([k, v]) => `${esc(k)} ${Math.round(v * 100)}%`).join(" · ") : "—"],
+    ["Library graded", p.library_graded
+      ? `${esc(p.library_graded.source)} · sha256 <span class="mono">${esc(short(p.library_graded.sha256))}</span>`
+        + (p.library_graded.changed_since_run ? ` · <b style="color:var(--fail)">changed since the run</b>` : "")
+      : "—"],
+  ];
+  if (gate && (gate.tested_image_content || gate.tested_image_id)) {
+    rows.push(["Gate tested", `<span class="mono">${esc(short(gate.tested_image_content || gate.tested_image_id))}</span>`]);
+  }
+  const contract = (p.contract_errors || []).length
+    ? `<div class="banner warn"><b>Transcript contract broken</b> for ${esc(p.contract_errors.join(", "))}:
+       the agent declared schema v1 and broke it, so those cases failed closed
+       (see each transcript's <span class="mono">contract_violations</span>).</div>`
+    : "";
+  return `${contract}
+    <details class="provenance"><summary>What was tested</summary>
+      <table><tbody>${rows.map(([k, v]) => `<tr><td class="id">${k}</td><td>${v}</td></tr>`).join("")}</tbody></table>
+    </details>`;
 }
 
 function caseDetail(r, meta) {

@@ -263,3 +263,7 @@ button.ctl:hover { border-color: var(--text-faint); }
   aside { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }
   main { padding: 18px 16px 60px; }
 }
+
+details.provenance { margin: 10px 0 16px; }
+details.provenance summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
+details.provenance table { margin-top: 8px; }

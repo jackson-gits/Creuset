@@ -60,3 +60,25 @@ def test_a_repeated_batch_lists_every_run_by_its_own_file(tmp_path, monkeypatch)
     client = TestClient(ui_app.app, base_url="http://127.0.0.1:8090")
     runs = [c["run"] for c in client.get("/api/batch", params={"name": "b1"}).json()["cases"]]
     assert runs == ["EX-001", "EX-001.r2"]
+
+
+def test_a_gate_report_says_what_was_tested(tmp_path, monkeypatch):
+    """Subject, settings, box and the deployed slot: a number means little without them."""
+    import json
+    import ui.app as ui_app
+    from fastapi.testclient import TestClient
+    report = {"gate_verdict": "PASS", "valid": True, "results": [], "repeat": 3,
+              "subject": {"kind": "bundled", "image": "creuset-agent:latest", "image_content": "sha256:ab"},
+              "run_settings": {"AGENT_MAX_TOKENS": "1024"}, "sandbox": {"memory": "512m"},
+              "contract_errors": ["EX-002"]}
+    record = {"decision": "DEPLOYED", "version": "v1.1.0", "slot": "green",
+              "tested_image_content": "sha256:ab", "score_report": report}
+    (tmp_path / "gate_runs").mkdir()
+    (tmp_path / "gate_runs" / "gate_1.json").write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(ui_app, "_LOGS", tmp_path)
+    client = TestClient(ui_app.app, base_url="http://127.0.0.1:8090")
+    data = client.get("/api/report", params={"path": "gate_runs/gate_1.json"}).json()
+    assert data["gate"]["slot"] == "green" and data["gate"]["tested_image_content"] == "sha256:ab"
+    p = data["provenance"]
+    assert p["repeat"] == 3 and p["run_settings"] == {"AGENT_MAX_TOKENS": "1024"}
+    assert p["subject"]["image"] == "creuset-agent:latest" and p["contract_errors"] == ["EX-002"]
