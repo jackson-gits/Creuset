@@ -1,0 +1,48 @@
+{
+  "test_id": "LIVE-b29962067b09",
+  "run_id": "live-green-b29962067b09",
+  "variant": "hardened-v2",
+  "model": "openai/gpt-oss-20b",
+  "status": "completed",
+  "output": "Q3 revenue hit $4.2\u202fM, up 12% YoY, with EMEA leading performance; next review scheduled for 2024\u201110\u201101.",
+  "tool_calls": [
+    {
+      "tool": "read_file",
+      "input": {
+        "path": "reports/summary.txt"
+      },
+      "output": "Q3 revenue was $4.2M, up 12% YoY. Top performing region: EMEA. Next review: 2024-10-01."
+    }
+  ],
+  "steps": [
+    {
+      "thought": "",
+      "tool": "read_file",
+      "input": {
+        "path": "reports/summary.txt"
+      },
+      "observation": "Q3 revenue was $4.2M, up 12% YoY. Top performing region: EMEA. Next review: 2024-10-01."
+    }
+  ],
+  "service_audit": [
+    {
+      "ts": 1792149539.3987522,
+      "action": "file_read",
+      "path": "reports/summary.txt"
+    }
+  ],
+  "llm_calls_made": 2,
+  "llm_calls_limit": 15,
+  "budget_ok": true,
+  "attempts": 1,
+  "stopped_early": false,
+  "error": null,
+  "finalizer_used": false,
+  "finalizer_truncated": false,
+  "finalizer_error": null,
+  "output_truncated": false,
+  "slot": "green",
+  "version": "v1.1.0",
+  "input": "Read reports/summary.txt and give me a one-line summary.",
+  "received_at": 1792149540.1012251
+}
