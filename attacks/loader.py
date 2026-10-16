@@ -77,8 +77,8 @@ from batch_files import (  # noqa: E402
     LIBRARY_SNAPSHOT, file_sha256, git_source, library_drift, library_path, recorded_library, recorded_name,
 )
 from run_test import (  # noqa: E402
-    Subject, env_fingerprint, image_content, image_id, limits_from_env, make_subject, parse_agent_env,
-    preflight, remove_containers, run_case,
+    TIMEOUT, Subject, _container_env, env_fingerprint, image_content, image_id, limits_from_env, make_subject,
+    parse_agent_env, preflight, remove_containers, run_case,
 )
 
 app = typer.Typer(add_completion=False)
@@ -338,6 +338,17 @@ class _Breaker:
 
 MAX_REPEAT = 50
 Run = Tuple[Dict[str, Any], int]   # (case, sample number from 1)
+
+# The agent's run settings the harness passes into every container, plus its
+# timeout. Recorded per batch: AGENT_MAX_TOKENS alone decides whether an answer
+# is cut off, so a resume under other values mixes two configurations in one
+# batch as surely as a different model would.
+_RUN_SETTINGS = ("AGENT_MAX_TOKENS", "FINALIZER_MAX_TOKENS", "MAX_LLM_CALLS")
+
+
+def run_settings() -> Dict[str, str]:
+    env = _container_env("x", "x")
+    return {**{name: env[name] for name in _RUN_SETTINGS}, "SANDBOX_TIMEOUT_SECONDS": str(TIMEOUT)}
 
 
 def run_key(case_id: str, sample: int = 1) -> str:
@@ -663,6 +674,8 @@ def run_suite(
                     "image_content": image_content(subject.image) if started_image_id else None},
         # The box it ran in: memory, CPUs and writable paths can change behaviour.
         "sandbox": limits_from_env().describe(),
+        # The agent's token caps, call budget and timeout (a resume must match them).
+        "run_settings": run_settings(),
         "library": recorded_library(library),
         "library_snapshot": LIBRARY_SNAPSHOT,
         "library_sha256": file_sha256(library),
@@ -817,6 +830,7 @@ def resume_suite(
     on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any], Path], None]] = None,
     allow_image_change: bool = False,
     agent_env: Tuple[Tuple[str, str], ...] = (),
+    allow_settings_change: bool = False,
 ) -> Path:
     """
     Finish a batch that stopped early, re-running only the cases that need it.
@@ -856,6 +870,20 @@ def resume_suite(
             f"This batch ran with AGENT_MODEL={previous_model}, but AGENT_MODEL is now "
             f"{current_model}. Resuming would mix two models inside one batch, which makes "
             f"its results incomparable. Set AGENT_MODEL back, or pass --allow-model-change "
+            f"if you genuinely intend a mixed batch.")
+
+    # The same for the agent's run settings. Batches older than the field ran
+    # under values nobody recorded, so there is nothing to compare.
+    recorded_settings = manifest.get("run_settings")
+    current_settings = run_settings()
+    if recorded_settings and recorded_settings != current_settings and not allow_settings_change:
+        changed = sorted(k for k in {*recorded_settings, *current_settings}
+                         if recorded_settings.get(k) != current_settings.get(k))
+        then = ", ".join(f"{k}={recorded_settings.get(k)}" for k in changed)
+        now = ", ".join(f"{k}={current_settings.get(k)}" for k in changed)
+        raise ValueError(
+            f"This batch ran with {then}, but it is now {now}. Resuming would mix two agent "
+            f"configurations inside one batch. Set them back, or pass --allow-settings-change "
             f"if you genuinely intend a mixed batch.")
 
     # The same for the build. A rebuilt image (a pulled fix, an edited prompt)
@@ -945,6 +973,7 @@ def resume_suite(
         "ts": int(time.time()),
         "agent_model": current_model,
         "agent_image_id": current_image,
+        "run_settings": current_settings,
         "reran": sorted(reasons),
         "reasons": reasons,
         **({"stopped": stopped} if stopped else {}),
@@ -1023,6 +1052,11 @@ def main(
     allow_image_change: bool = typer.Option(False, "--allow-image-change",
                                             help="With --resume, allow finishing a batch after the agent image "
                                                  "was rebuilt. Makes the batch internally incomparable."),
+    allow_settings_change: bool = typer.Option(False, "--allow-settings-change",
+                                               help="With --resume, allow finishing a batch under different "
+                                                    "AGENT_MAX_TOKENS / FINALIZER_MAX_TOKENS / MAX_LLM_CALLS / "
+                                                    "SANDBOX_TIMEOUT_SECONDS. Makes the batch internally "
+                                                    "incomparable."),
     agent_env: Optional[List[str]] = typer.Option(None, "--agent-env", metavar="KEY=VALUE",
                                                   help="A setting for the agent's container (repeatable). Never a secret."),
     agent_env_file: Optional[Path] = typer.Option(None, "--agent-env-file", envvar="CREUSET_AGENT_ENV_FILE",
@@ -1050,6 +1084,7 @@ def main(
                 allow_model_change,
                 allow_image_change=allow_image_change,
                 agent_env=env,
+                allow_settings_change=allow_settings_change,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             console.print(f"[red]✗ {e}[/red]")
