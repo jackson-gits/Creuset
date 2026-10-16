@@ -47,6 +47,21 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Added
 
+- **`creuset` command**: `pip install -e .` in a checkout installs one entry
+  point (`creuset.py`) that runs every script from any directory: `creuset
+  doctor`, `run`, `batch`, `score`, `gate`, `switch`, `monitor`, `simulate`,
+  `eval`, `ui`. Each command is its script, run as `python <script>` would run
+  it, with the script's own options and exit codes. `pyproject.toml` now
+  carries project metadata (version 1.0.0, dependencies from
+  `requirements.txt`).
+- **Batches record their run settings** (`AGENT_MAX_TOKENS`,
+  `FINALIZER_MAX_TOKENS`, `MAX_LLM_CALLS`, `SANDBOX_TIMEOUT_SECONDS`), and a
+  resume under other values is refused like a different model
+  (`--allow-settings-change`). Score reports copy them and the sandbox limits.
+- **Results browser: "What was tested"**: the subject and its image IDs, runs
+  per case, run settings, sandbox limits, thresholds, the library graded, a
+  banner for transcript contract errors, and a gate run's slot and tested image.
+
 - **`--tag`** on the loader and the gate (and a `tags` input on the action):
   run only the cases carrying any of the given tags, such as a `smoke` set on
   every PR and everything nightly, or one OWASP category. Manifests and gate
@@ -209,6 +224,10 @@ that says *none* means every fingerprint in `baseline.lock.json` was unchanged.
 
 ### Fixed
 
+- **The gate's relative paths changed meaning**: `--library`, `--waivers` and
+  `--agent-env-file` reached the loader and scorer, which run from the repo
+  root, unresolved, so from any other directory they named another file there
+  (or none). They are resolved against the caller's directory first.
 - **A restarted monitor could roll traffic back onto the bad build**: the
   monitor's list of files already checked lives in memory, so after a restart it
   re-read `logs/live_traffic/`, met the same offending transcript, and rolled

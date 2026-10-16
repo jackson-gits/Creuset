@@ -416,3 +416,17 @@ def test_sigterm_stops_the_gate_like_ctrl_c():
         with run_gate._sigterm_interrupts():
             signal.raise_signal(signal.SIGTERM)
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_relative_paths_mean_the_callers_files(gate_env, monkeypatch, tmp_path):
+    """The loader and scorer run from the repo root: a relative path must not change meaning there."""
+    logs, calls = gate_env
+    _scorer(monkeypatch)
+    work = tmp_path / "elsewhere"
+    work.mkdir()
+    (work / "lib.yaml").write_text("cases: []\n")
+    monkeypatch.chdir(work)
+    result = runner.invoke(run_gate.app, ["--version", "1.4.0", "--variant", "v1-4", "--dry-run",
+                                          "--agent-image", "my-agent:1.4.0", "--library", "lib.yaml"])
+    assert result.exit_code == 0, result.output
+    assert calls["suite"][0]["library"] == (work / "lib.yaml").resolve()

@@ -256,6 +256,12 @@ pip install -r requirements.txt
 
 `requirements.txt` is host-side only. The containers install their own narrower sets (`agent/`, `sandbox/mock_services/`, `deploy/`).
 
+Optionally, `pip install -e .` adds one `creuset` command that runs every script from any
+directory: `creuset doctor`, `creuset gate …`, `creuset batch …` (the loader),
+`creuset score …`, `creuset switch status`, `creuset ui`, and the rest under
+`creuset --help`. Each is the script itself, with its own options and exit codes; the
+commands below work either way.
+
 To run the test suite (no Docker, no API key, no quota):
 ```bash
 pip install -r requirements.txt -r agent/requirements.txt -r requirements-dev.txt
