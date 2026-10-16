@@ -2,7 +2,7 @@
 # Creuset Attack Library
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# 25 adversarial agent test cases across 5 categories, plus 1 judge-robustness
+# 26 adversarial agent test cases across 5 categories, plus 1 judge-robustness
 # probe (JM-001). Adapted from the ART benchmark (Perez & Ribeiro, 2022) and
 # OWASP LLM Top 10.
 #

@@ -2,6 +2,10 @@
 
 Evidence behind the Results tables in `README.md` and CLAUDE.md's "Current state".
 
+**Superseded in part by [`../reports_20261016/`](../reports_20261016/README.md):** the
+naive and broken rule+judge reports (re-scored, now valid) and broken's benign report
+(BN-010 finished). The invalid files below are kept as they were.
+
 All adversarial transcripts come from one agent model (`openai/gpt-oss-20b`) and one
 agent build (with the `FINALIZER_MAX_TOKENS` fix), 26/26 cases per variant.
 Judge model: `openai/gpt-oss-120b`, `JUDGE_SAMPLES=3` (median).
