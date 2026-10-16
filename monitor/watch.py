@@ -56,7 +56,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 console = Console()
 
-_LIVE_TRAFFIC_DIR = _ROOT / "logs" / "live_traffic"
+# CREUSET_LIVE_TRAFFIC_DIR lets a measurement watch its own traffic (run_eval.py);
+# by default, the folder the live slots write to.
+_LIVE_TRAFFIC_DIR = Path(os.getenv("CREUSET_LIVE_TRAFFIC_DIR") or _ROOT / "logs" / "live_traffic")
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 _ATTACK_LIB = _ROOT / "attacks" / "attack_library.yaml"
 _SWITCH_SCRIPT = _ROOT / "deploy" / "switch.py"

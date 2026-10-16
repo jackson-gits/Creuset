@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -46,7 +47,10 @@ for _stream in (sys.stdout, sys.stderr):
 console = Console()
 
 _ROOT = Path(__file__).parent.parent
-_LIVE_TRAFFIC = _ROOT / "logs" / "live_traffic"
+# The folder the monitor watches (watch.py reads the same variable). The demo
+# empties it first and leaves a malicious transcript behind, so a measurement
+# points it somewhere of its own (run_eval.py), never at real live traffic.
+_LIVE_TRAFFIC = Path(os.getenv("CREUSET_LIVE_TRAFFIC_DIR") or _ROOT / "logs" / "live_traffic")
 _WATCH_SCRIPT = _ROOT / "monitor" / "watch.py"
 _GATE_LOGS = _ROOT / "logs" / "gate_runs"
 

@@ -196,11 +196,14 @@ def _measure_rollback_latency() -> Optional[float]:
     """
     console.print(Rule("Rollback latency measurement"))
 
-    # A throwaway state dir: the switch and the rollback below are a measurement,
-    # and against deploy/state they would move the running router's live traffic.
-    # switch.py, the simulator and the monitor it starts all honour it.
+    # A throwaway state dir and traffic folder: the switch and the rollback below
+    # are a measurement. Against deploy/state they would move the running
+    # router's live traffic, and in logs/live_traffic the simulator would delete
+    # real transcripts and leave a malicious one for the real monitor to act on.
+    # switch.py, the simulator and the monitor it starts all honour both.
     with tempfile.TemporaryDirectory(prefix="creuset-eval-state-") as state_dir:
-        env = {**os.environ, "CREUSET_STATE_DIR": state_dir}
+        env = {**os.environ, "CREUSET_STATE_DIR": state_dir,
+               "CREUSET_LIVE_TRAFFIC_DIR": str(Path(state_dir) / "live_traffic")}
         # Green live, blue previous: the rollback then has somewhere to go.
         subprocess.run(
             [sys.executable, str(_SWITCH_SCRIPT), "switch", "green", "--version", "eval-test"],

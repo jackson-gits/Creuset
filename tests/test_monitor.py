@@ -99,16 +99,37 @@ def test_rollback_measurement_never_touches_the_live_state(monkeypatch):
     seen = []
 
     def fake_run(cmd, **kwargs):
-        seen.append((cmd, (kwargs.get("env") or {}).get("CREUSET_STATE_DIR")))
+        env = kwargs.get("env") or {}
+        seen.append((cmd, env.get("CREUSET_STATE_DIR"), env.get("CREUSET_LIVE_TRAFFIC_DIR")))
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(run_eval.subprocess, "run", fake_run)
     run_eval._measure_rollback_latency()
 
     assert len(seen) == 2   # the switch, then the simulator (which starts the monitor)
-    state_dirs = {state for _, state in seen}
+    state_dirs = {state for _, state, _ in seen}
     assert len(state_dirs) == 1 and None not in state_dirs   # both in one throwaway dir
     assert ROOT not in Path(state_dirs.pop()).resolve().parents   # never deploy/state
+    # Nor logs/live_traffic: the simulator empties it and leaves a malicious
+    # transcript, which the real monitor would act on against real traffic.
+    traffic = seen[1][2]
+    assert traffic and ROOT not in Path(traffic).resolve().parents
+
+
+def test_the_traffic_folder_is_configurable(tmp_path, monkeypatch):
+    import importlib.util
+    monkeypatch.setenv("CREUSET_LIVE_TRAFFIC_DIR", str(tmp_path / "t"))
+    environ = dict(os.environ)
+    try:
+        for name, path in (("watch_t", "monitor/watch.py"), ("simulate_t", "monitor/simulate_traffic.py")):
+            spec = importlib.util.spec_from_file_location(name, ROOT / path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            folder = getattr(module, "_LIVE_TRAFFIC_DIR", None) or module._LIVE_TRAFFIC
+            assert folder == tmp_path / "t"
+    finally:   # load_dotenv() ran again: keep a developer's .env out of later tests
+        os.environ.clear()
+        os.environ.update(environ)
 
 
 def test_benign_batch_is_the_one_the_loader_names(monkeypatch, tmp_path):
