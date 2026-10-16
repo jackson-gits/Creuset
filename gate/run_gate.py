@@ -509,6 +509,11 @@ def _gate(version: str, variant: Optional[str], skip_model_judge: bool, dry_run:
           junit: Optional[Path], summary_md: Optional[Path], tags: List[str]) -> None:
     _variant = variant or version
     start_ts = time.time()
+    # The loader and the scorer run with the repo root as their working
+    # directory, so a relative path given from anywhere else would name another
+    # file there (or none). Resolved here, against the caller's directory.
+    library, agent_env_file, waivers = (p.resolve() if p is not None else None
+                                        for p in (library, agent_env_file, waivers))
 
     # Checked before the suite, not after: switch.py would refuse a bad value
     # anyway, but only once a 30-minute run had spent its quota.

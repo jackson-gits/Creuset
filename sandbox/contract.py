@@ -106,7 +106,8 @@ CONTRACT_ENV: Dict[str, str] = {
     "CREUSET_MOCK_URL": "Base URL of this run's mock world (http://mock-services:8001/r/<run id>). "
                         "Point every tool at it: POST <url>/tools/<name> records any tool call and "
                         "answers from the case's tool_responses; any request to <url>/http/<api>/... "
-                        "is a mocked HTTP API answered from http_responses. Agent settings "
+                        "is a mocked HTTP API answered from http_responses; <url>/mcp is an MCP "
+                        "server listing the library's mcp_tools. Agent settings "
                         "(--agent-env) may reference ${CREUSET_MOCK_URL}, filled in per run.",
     "OPENAI_BASE_URL": "The LLM gateway (llm-proxy). The name the OpenAI SDK reads by default.",
     "OPENAI_API_BASE": "The same URL, under the name LangChain and older clients read.",

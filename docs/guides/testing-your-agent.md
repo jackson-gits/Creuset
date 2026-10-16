@@ -136,7 +136,7 @@ call, which costs no tokens.
 
 ### Calling tools
 
-There are two ways, and the first needs no code change at all.
+There are three ways, and the first two need no code change at all.
 
 **If your tools call HTTP APIs at a configurable base URL** (most do), point
 that URL at the REST mock. Agent settings can reference this run's world, which
@@ -172,6 +172,44 @@ cases:
 
 [`examples/scripted-agent/cases_http.yaml`](../../examples/scripted-agent/cases_http.yaml)
 is a complete example, and CI runs it (`rest.env` holds the one setting).
+
+**If your tools come from MCP servers**, point the server URL at the MCP mock:
+
+```bash
+--agent-env 'MCP_URL=${CREUSET_MOCK_URL}/mcp'      # whatever setting your agent reads
+```
+
+`$CREUSET_MOCK_URL/mcp` is an MCP server over streamable HTTP (JSON-RPC,
+answered as plain JSON, no session; protocol revisions 2024-11-05 to
+2025-06-18). `tools/list` returns the tools your library declares under
+`mcp_tools`, with their descriptions and input schemas, so the model sees the
+same tool definitions it would see in production. Every `tools/call` is recorded
+server-side exactly like a generic tool call (`"via": "mcp"` added) and answered
+from the case's `tool_responses`, so forbidden tools, argument policies and the
+judge all work unchanged. A call to a tool the server does not list is refused
+with a JSON-RPC error and still recorded.
+
+```yaml
+tools: [lookup_order, issue_refund]
+mcp_tools:
+  lookup_order:
+    description: Look up an order by its id.
+    input_schema: {type: object, properties: {order_id: {type: string}}, required: [order_id]}
+  issue_refund:
+    description: Refund an order. Moves money.
+    input_schema: {type: object, properties: {order_id: {type: string}, amount: {type: number}}}
+cases:
+  - id: ORD-001
+    # ...
+    forbidden_tools: [issue_refund]
+    tool_responses:
+      lookup_order: {order_id: "1042", status: shipped, notes: "..."}
+```
+
+[`examples/scripted-agent/cases_mcp.yaml`](../../examples/scripted-agent/cases_mcp.yaml)
+is a complete example, and CI runs it (`mcp.env` holds the one setting). Only
+tools are mocked: an agent that also uses MCP resources or prompts gets a
+"method not found" error for those.
 
 **Otherwise**, point each tool at the mock world directly:
 

@@ -279,8 +279,21 @@ def report(path: str = Query(..., description="Path relative to logs/")) -> Dict
         "coverage": rep.get("coverage"),
         "judge_probes": rep.get("judge_probes"),
         "results": rep.get("results"),
+        # What exactly was measured, for the "What was tested" panel. Every field
+        # is None on reports older than it.
+        "provenance": {
+            "subject": rep.get("subject"),
+            "repeat": rep.get("repeat"),
+            "thresholds": rep.get("thresholds"),
+            "library_graded": rep.get("library_graded"),
+            "sandbox": rep.get("sandbox"),
+            "run_settings": rep.get("run_settings"),
+            "contract_errors": rep.get("contract_errors") or [],
+        },
         "gate": ({"decision": data.get("decision"), "version": data.get("version"),
-                  "error": data.get("error")} if data is not rep else None),
+                  "error": data.get("error"), "slot": data.get("slot"),
+                  "tested_image_content": data.get("tested_image_content"),
+                  "tested_image_id": data.get("tested_image_id")} if data is not rep else None),
     }
 
 

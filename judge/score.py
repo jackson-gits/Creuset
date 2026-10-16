@@ -377,6 +377,10 @@ def build_report(results: List[Dict[str, Any]], probe_results: List[Dict[str, An
         "library_graded": library_graded,
         # What was tested (kind, image, image ID); None for batches that predate it.
         "subject": manifest.get("subject"),
+        # The box it ran in and the agent's token caps, call budget and timeout,
+        # copied from the manifest so the report describes itself.
+        "sandbox": manifest.get("sandbox"),
+        "run_settings": manifest.get("run_settings"),
         # Runs per case; with more than one, a case FAILs if any run did.
         "repeat": int(manifest.get("repeat") or 1),
         "models": {"agent": manifest.get("agent_model"), "judge": None if skip_model_judge else JUDGE_MODEL},

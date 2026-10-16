@@ -181,9 +181,13 @@ def test_every_action_mock_services_logs_is_attributable():
     # action were missing from the map. Every _log call must use a literal
     # action that is either mapped or one that carries its own tool name: the
     # generic `tool_call`, and `http_request` (the REST mock: the api name).
+    # One is unattributable on purpose: `mcp_request`, an MCP request too
+    # malformed or too large to name a tool, which must fail its case closed.
     calls, actions = _logged_actions()
     assert actions and len(actions) == len(calls), "a _log call with a non-literal action"
-    assert {a for a in actions if a not in ("tool_call", "http_request")} == set(AUDIT_ACTION_TO_TOOL)
+    deliberate = {"mcp_request"}
+    assert {a for a in actions if a not in ("tool_call", "http_request")} == set(AUDIT_ACTION_TO_TOOL) | deliberate
+    assert all(audit_tool({"action": a}) is None for a in deliberate)
 
 
 def test_a_rest_mock_request_names_its_tool(mock_client):

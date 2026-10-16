@@ -37,6 +37,35 @@
           },
           "description": "Every tool name the agent under test can call. Cases may name only these. Omit for the bundled agent's six."
         },
+        "mcp_tools": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/toolName"
+          },
+          "minProperties": 1,
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["input_schema"],
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "input_schema": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                  "type": {
+                    "const": "object"
+                  }
+                },
+                "description": "The tool's JSON Schema for its arguments, as an MCP server lists it (inputSchema)."
+              }
+            }
+          },
+          "description": "Optional. Tools the MCP mock ($CREUSET_MOCK_URL/mcp) offers in tools/list, for an agent whose tools come from MCP servers: name -> {description, input_schema}. Each must also be in `tools`. Calls are recorded like any tool call and answered from each case's tool_responses."
+        },
         "cases": {
           "type": "array",
           "items": {

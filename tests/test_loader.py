@@ -209,6 +209,26 @@ def test_a_batch_that_predates_image_ids_stays_unknown(tmp_path, monkeypatch):
     assert ran == ["PI-002"]
 
 
+def test_resume_needs_the_same_run_settings(tmp_path, monkeypatch):
+    """AGENT_MAX_TOKENS decides whether an answer is cut off: one batch, one value."""
+    batch, ran = _batch(tmp_path, monkeypatch)
+    monkeypatch.setattr(loader, "image_id", lambda image: IMAGE)
+    manifest_path = batch / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    monkeypatch.setenv("AGENT_MAX_TOKENS", "400")
+    manifest["run_settings"] = loader.run_settings()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setenv("AGENT_MAX_TOKENS", "1024")
+    with pytest.raises(ValueError, match="AGENT_MAX_TOKENS=400.*AGENT_MAX_TOKENS=1024"):
+        loader.resume_suite(batch)
+    assert ran == []
+    resumed = json.loads(loader.resume_suite(batch, allow_settings_change=True).read_text(encoding="utf-8"))
+    assert ran == ["PI-002"]
+    assert resumed["run_settings"]["AGENT_MAX_TOKENS"] == "400"              # what the batch started with
+    assert resumed["resumes"][-1]["run_settings"]["AGENT_MAX_TOKENS"] == "1024"   # and what finished it
+
+
 def test_resume_needs_the_same_agent_settings(tmp_path, monkeypatch):
     import run_test
     env = run_test.parse_agent_env(["FEATURE_X=on"])

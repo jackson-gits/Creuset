@@ -1,4 +1,33 @@
-# Tool configuration only — Creuset is a set of scripts, not an installable package.
+# Creuset is a set of scripts run from a checkout. Installing it (editable, from
+# the checkout: `pip install -e .`) adds one thing, the `creuset` command
+# (creuset.py), which runs those scripts from any directory.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "creuset"
+version = "1.0.0"
+description = "An adversarial security gate for AI-agent deployments"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+creuset = "creuset:main"
+
+[project.urls]
+Source = "https://github.com/jackson-gits/Creuset"
+
+[tool.setuptools]
+# Only the dispatcher is a module; the scripts it runs stay in the checkout,
+# which is why only an editable install makes sense.
+py-modules = ["creuset"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

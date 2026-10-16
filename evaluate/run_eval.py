@@ -29,8 +29,10 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -123,21 +125,25 @@ def _run_false_positive_check(variant: str, skip_model_judge: bool) -> Dict[str,
     """Run benign tasks through the judge and compute false-positive rate."""
     console.print(Rule(f"False-positive check — variant: [cyan]{variant}[/cyan]"))
 
-    # Run loader on benign tasks
-    cmd = [
-        sys.executable, str(_LOADER_SCRIPT),
-        "--library", str(_BENIGN_LIB),
-        "--variant", variant,
-    ]
-    started = time.time()
-    subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
+    # Run loader on benign tasks. It names its own batch (--manifest-out), as it
+    # does for the gate: picking the newest manifest by file time could score
+    # another batch's transcripts (a coarse filesystem clock, a second loader).
+    with tempfile.TemporaryDirectory(prefix="creuset-eval-") as tmp:
+        out = Path(tmp) / "manifest-path"
+        cmd = [
+            sys.executable, str(_LOADER_SCRIPT),
+            "--library", str(_BENIGN_LIB),
+            "--variant", variant,
+            "--manifest-out", str(out),
+        ]
+        subprocess.run(cmd, cwd=str(_ROOT), capture_output=False, text=True)
+        try:
+            manifest = Path(out.read_text(encoding="utf-8").strip())
+        except OSError:
+            manifest = None
+    if manifest is None or not manifest.is_file():
+        return {"fp_rate": None, "error": "The loader named no batch manifest"}
 
-    # Newest manifest from THIS run — an older one would score stale transcripts.
-    manifests = [p for p in _RUNS_DIR.glob("*/manifest.json") if p.stat().st_mtime >= started]
-    if not manifests:
-        return {"fp_rate": None, "error": "No batch manifest found"}
-
-    manifest = max(manifests, key=lambda p: p.stat().st_mtime)
     ts = int(time.time())
     report_path = _LOGS_DIR / f"benign_score_{ts}.json"
 
@@ -190,18 +196,26 @@ def _measure_rollback_latency() -> Optional[float]:
     """
     console.print(Rule("Rollback latency measurement"))
 
-    # Reset state to green first so rollback actually does something visible
-    subprocess.run(
-        [sys.executable, str(_SWITCH_SCRIPT), "switch", "green", "--version", "eval-test"],
-        cwd=str(_ROOT), capture_output=True, text=True,
-    )
+    # A throwaway state dir and traffic folder: the switch and the rollback below
+    # are a measurement. Against deploy/state they would move the running
+    # router's live traffic, and in logs/live_traffic the simulator would delete
+    # real transcripts and leave a malicious one for the real monitor to act on.
+    # switch.py, the simulator and the monitor it starts all honour both.
+    with tempfile.TemporaryDirectory(prefix="creuset-eval-state-") as state_dir:
+        env = {**os.environ, "CREUSET_STATE_DIR": state_dir,
+               "CREUSET_LIVE_TRAFFIC_DIR": str(Path(state_dir) / "live_traffic")}
+        # Green live, blue previous: the rollback then has somewhere to go.
+        subprocess.run(
+            [sys.executable, str(_SWITCH_SCRIPT), "switch", "green", "--version", "eval-test"],
+            cwd=str(_ROOT), capture_output=True, text=True, env=env,
+        )
 
-    result_path = _LOGS_DIR / f"rollback_latency_{int(time.time())}.json"
-    subprocess.run(
-        [sys.executable, str(_TRAFFIC_SIM), "--benign-count", "2", "--inject-attack",
-         "--result-json", str(result_path)],
-        cwd=str(_ROOT), capture_output=False, text=True, timeout=60,
-    )
+        result_path = _LOGS_DIR / f"rollback_latency_{int(time.time())}.json"
+        subprocess.run(
+            [sys.executable, str(_TRAFFIC_SIM), "--benign-count", "2", "--inject-attack",
+             "--result-json", str(result_path)],
+            cwd=str(_ROOT), capture_output=False, text=True, timeout=60, env=env,
+        )
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

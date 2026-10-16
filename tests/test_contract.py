@@ -84,6 +84,7 @@ REFERENCE_TRANSCRIPT = {
     "finalizer_used": True,
     "finalizer_truncated": False,
     "finalizer_error": None,
+    "output_truncated": False,
 }
 
 
