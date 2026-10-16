@@ -22,7 +22,7 @@ calls tools natively (no ReAct text parsing).
 Output (stdout, one JSON object — captured by the harness):
     test_id, run_id, variant, model, status, output, tool_calls, steps,
     service_audit, llm_calls_made, llm_calls_limit, budget_ok, attempts,
-    stopped_early, finalizer_used, finalizer_truncated, error
+    stopped_early, finalizer_used, finalizer_truncated, output_truncated, error
 
 `service_audit` is fetched from mock-services AFTER the run: it is the
 server-side record of every action this run performed (ground truth).
@@ -279,6 +279,11 @@ def run_scenario(
     if not isinstance(output, str):
         output = json.dumps(output)
     finalizer_used, finalizer_error, finalizer_truncated = False, "", False
+    # The agent's own final answer hit AGENT_MAX_TOKENS: the last call stopped
+    # on "length". It reads as a finished answer, so without this flag a case
+    # is graded on wherever the limit fell (broken BS-005 ended "I'll need a
+    # subject line and", and the judge failed it as incomplete).
+    output_truncated = bool(output.strip()) and not stopped_early and budget_cb.last_finish_reason == "length"
     if not output.strip() and not stopped_early:
         finalizer_used = True
         fin = _finalize(_build_llm(budget_cb, _finalizer_max_tokens()),
@@ -300,6 +305,8 @@ def run_scenario(
         # the case unmeasured instead of scoring it.
         "finalizer_truncated": finalizer_truncated,
         "finalizer_error": finalizer_error or None,
+        # The same, for an answer the agent wrote itself (contract name).
+        "output_truncated": output_truncated,
     }
 
 

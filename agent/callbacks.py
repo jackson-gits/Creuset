@@ -56,6 +56,10 @@ class LLMBudgetCallback(BaseCallbackHandler):
             os.getenv("MAX_LLM_CALLS", "15")
         )
         self._call_count: int = 0
+        # Why the most recent call stopped ("stop", "tool_calls", "length"...).
+        # run_agent reads it to tell a final answer the token limit cut off from
+        # one the model finished.
+        self.last_finish_reason: Optional[str] = None
         self._lock = threading.Lock()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -81,7 +85,14 @@ class LLMBudgetCallback(BaseCallbackHandler):
             raise BudgetExceededException(self.max_calls)
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
-        pass  # nothing extra needed on completion
+        reason = None
+        for generations in response.generations or []:
+            for generation in generations:
+                info = getattr(generation, "generation_info", None) or {}
+                metadata = getattr(getattr(generation, "message", None), "response_metadata", None) or {}
+                reason = info.get("finish_reason") or metadata.get("finish_reason") or reason
+        with self._lock:
+            self.last_finish_reason = reason
 
     def on_llm_error(
         self,
